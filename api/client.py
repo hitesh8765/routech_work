@@ -75,7 +75,7 @@ class RoutechAPIClient:
         comes back 403 (token likely rotated/expired).
         """
         resp = self.request.get("/bookings/add")
-        resp.raise_for_status()
+        self._check_ok(resp)
         html = resp.text()
         token = extract_csrf_token(html)
         if not token:
@@ -106,6 +106,20 @@ class RoutechAPIClient:
                 f"body[:500]={resp.text()[:500]!r}"
             ) from exc
 
+    @staticmethod
+    def _check_ok(resp):
+        """
+        Playwright's APIResponse has no `.raise_for_status()` (that's a
+        requests/httpx method) -- it exposes `.ok` (bool) and `.status`
+        (int) instead. This is the equivalent: raises with a useful message
+        (URL, status, response body) on any non-2xx response.
+        """
+        if not resp.ok:
+            raise RuntimeError(
+                f"Request to {resp.url} failed: status={resp.status} {resp.status_text}, "
+                f"body[:500]={resp.text()[:500]!r}"
+            )
+
     # ------------------------------------------------------------------
     # booking form / reference data
     # ------------------------------------------------------------------
@@ -120,7 +134,7 @@ class RoutechAPIClient:
             "/bookings/booking_form",
             form={"no_of_booking": str(no_of_booking), "booking_type": booking_type},
         )
-        resp.raise_for_status()
+        self._check_ok(resp)
         return resp.text()
 
     def get_saved_locations(self, booking_type: str = "parcel") -> list[dict]:
@@ -137,7 +151,7 @@ class RoutechAPIClient:
             "/bookings/get_hs_codes",
             params={"search": item_name, "item_name": item_name},
         )
-        resp.raise_for_status()
+        self._check_ok(resp)
         return self._safe_json(resp)
 
     def get_delivery_and_rate(self, payload: dict) -> dict:
@@ -171,7 +185,7 @@ class RoutechAPIClient:
         names seen in the final /bookings/add payload).
         """
         resp = self.request.post("/bookings/get_delivery_and_rate", form=payload)
-        resp.raise_for_status()
+        self._check_ok(resp)
         return self._safe_json(resp)
 
     # ------------------------------------------------------------------
@@ -208,7 +222,7 @@ class RoutechAPIClient:
             token = self.csrf_token(force_refresh=True)
             multipart["_csrf"] = token
             resp = self.request.post("/bookings/add", multipart=multipart)
-        resp.raise_for_status()
+        self._check_ok(resp)
         return self._safe_json(resp)
 
     def make_ppd_payment(
@@ -248,7 +262,7 @@ class RoutechAPIClient:
             "payment_type": json.dumps(["wallet"] if is_wallet else ["online"]),
         }
         resp = self.request.post("/bookings/make_ppd_payment", multipart=multipart)
-        resp.raise_for_status()
+        self._check_ok(resp)
         return self._safe_json(resp)
 
     # ------------------------------------------------------------------
@@ -261,7 +275,7 @@ class RoutechAPIClient:
         booking number / status / echoed fields post-creation.
         """
         resp = self.request.get(f"/bookings/get_booking_details/{booking_id}")
-        resp.raise_for_status()
+        self._check_ok(resp)
         return resp.text()
 
     def booking_number_from_details(self, booking_id: str) -> Optional[str]:

@@ -72,8 +72,15 @@ def perform_ui_login(account_type: str = "b2b", headless: bool = None) -> Path:
         page.goto(settings.LOGIN_URL)
 
         # "Login as business" is selected by default; only switch for c2c.
+        # NOTE: both radios and the submit control are real elements with
+        # stable IDs -- confirmed via live DOM inspection (2026-09-18):
+        #   #user_type_business / #user_type_customer  (radio inputs)
+        #   #login-business-btn-id (an <a> tag, shared by BOTH forms --
+        #   despite the "business" in its id/class, it submits whichever
+        #   form is currently active). It is NOT a <button>, so
+        #   get_by_role("button", name="Submit") never matches it.
         if account_type == "c2c":
-            page.get_by_text("Login as individual", exact=False).click()
+            page.locator("#user_type_customer").click()
 
         page.get_by_label("Email/Mobile Number").fill(email)
         page.get_by_label("Password", exact=False).fill(password)
@@ -91,23 +98,23 @@ def perform_ui_login(account_type: str = "b2b", headless: bool = None) -> Path:
         while confirmation.strip().lower() != "yes done":
             confirmation = input("Type 'yes done' once the captcha is solved: ")
 
-        submit_button = page.get_by_role("button", name="Submit")
+        submit_button = page.locator("#login-business-btn-id")
         try:
             submit_button.click(timeout=15_000)
+            page.wait_for_url("**/dashboard", timeout=settings.DEFAULT_TIMEOUT_MS)
         except Exception as exc:
-            # Most likely cause: captcha wasn't actually completed (still
-            # unchecked/expired), so the button never became enabled/clickable.
-            debug_path = state_path.with_name(f"{account_type}_login_failure.png")
-            page.screenshot(path=str(debug_path))
+            debug_png = state_path.with_name(f"{account_type}_login_failure.png")
+            debug_html = state_path.with_name(f"{account_type}_login_failure.html")
+            page.screenshot(path=str(debug_png))
+            debug_html.write_text(page.content(), encoding="utf-8")
             raise RuntimeError(
-                "Could not click Submit -- it likely never became enabled, which "
-                "usually means the captcha wasn't actually completed (or expired) "
-                f"before confirming. A screenshot was saved to {debug_path} -- "
-                "open it to check the captcha's state. Re-run the test and make "
-                "sure the checkbox shows a green checkmark before typing 'yes done'."
+                "Login did not complete as expected after clicking Submit. "
+                f"Current URL: {page.url}. A screenshot was saved to {debug_png} "
+                f"and the page HTML to {debug_html} -- send both back for diagnosis. "
+                "Possible causes: captcha expired between confirming and the click, "
+                "a validation error was shown (wrong credentials/expired captcha), "
+                "or the page navigated somewhere other than /dashboard."
             ) from exc
-
-        page.wait_for_url("**/dashboard", timeout=settings.DEFAULT_TIMEOUT_MS)
 
         context.storage_state(path=str(state_path))
         browser.close()

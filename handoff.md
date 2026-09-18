@@ -68,6 +68,19 @@ assuming so (structurally likely similar, but not yet confirmed).
   `application/x-www-form-urlencoded`, body includes:
   `user_type`, `_csrf`, `country_code`, `user_name`, `password`,
   `g-recaptcha-response`.
+- **Login page control IDs (confirmed via live DOM inspection):**
+  - `#user_type_business` / `#user_type_customer` — the two radio inputs
+    (note: "customer" in the DOM = C2C/"individual" in the UI copy).
+  - `#login-business-btn-id` — the Submit control for **both** forms
+    (misleadingly named, but shared). **It's an `<a href="javascript:void(0)">`,
+    not a `<button>`** — same JS-click-driven pattern as the booking-type
+    tiles (§4 conversation log item 4). `get_by_role("button", name="Submit")`
+    silently matches nothing and hangs until timeout; use
+    `page.locator("#login-business-btn-id")` instead. This cost a full
+    debug cycle — site-wide takeaway: **assume interactive controls here
+    are `<a>` tags with JS handlers, not semantic `<button>`s, and prefer
+    ID/class selectors over role-based locators** unless you've confirmed
+    the actual tag first.
 - On success, server sets:
   - `session` cookie (httpOnly, signed, Express `express-session`)
   - `_csrf` cookie
@@ -212,6 +225,32 @@ read (captured request payloads, not responses, for these):
 debugger) each raw response the first time it's hit, then tighten the
 extraction helpers and `RoutechAPIClient` docstrings to match reality.
 This should be a quick pass, not a redesign — the request side is solid.
+
+**Confirmed since (live run, first real test execution):**
+- `/bookings/add` **error** response shape:
+  `{'status': 'error', 'message': [{'param', 'msg', 'key'}, ...], 'req_data': {...full echoed request, WITH a server-generated booking_id already nested inside req_data.booking_detail[0].booking_id...}}`.
+  Strong signal the **success** shape nests `booking_id` the same way
+  (`result.booking_detail[0].booking_id`) — extraction code now checks
+  both the flat level and this nested path.
+- `stakeholder_name` (Receiver Name) validation: **letters and numbers
+  only, no special characters** — a name like "Ahmed Al-Saud" (hyphen)
+  is rejected with `user.invalid_name`. `RECEIVER_NAME_POOL` in
+  `data/booking_payloads.py` was fixed accordingly (no hyphens/apostrophes).
+- `get_hs_codes` confirmed shape: `{'status': 'success', 'result': [{'id': '<hs code>', ...}, ...]}`.
+
+**Open hypothesis (unconfirmed) — Saudi dropoff using a saved location fails:**
+When `saudi_side="dropoff"`, reusing one of the account's own **saved
+pickup-location** entries verbatim as the dropoff produced:
+`dropoff_address: "Please enter valid location."` — while the exact same
+approach with a non-Saudi (India) dropoff succeeded. Working theory: the
+server may reject a dropoff address that exactly matches one of the
+account's own registered pickup/business locations (can't ship to your
+own address?). NOT yet confirmed — needs either (a) a live recon of a
+real UI booking with an international pickup + Saudi dropoff to diff the
+payload, or (b) trying a Saudi dropoff address that ISN'T one of the
+saved pickup locations (e.g. via the `/bookings/load_map` new-location
+flow instead of reusing `get_saved_locations()` for both sides). Until
+resolved, treat `saudi_side="pickup"` as the reliably-working path.
 
 **Not yet built:**
 - `/bookings/load_map` flow (fresh/international location via Google Maps

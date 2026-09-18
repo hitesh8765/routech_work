@@ -37,6 +37,15 @@ ITEM_NAME_POOL = [
 ITEM_QUANTITY_POOL = [20, 100, 50, 60, 10, 200, 150]
 ITEM_PRICE_POOL = [100, 200, 500, 1000, 699, 800, 700]
 
+# Server-confirmed validation on stakeholder_name (Receiver Name):
+# "Please enter a valid name using only letters and numbers. Special
+# characters are not allowed" -- so NO hyphens/apostrophes here, even
+# though they're common in real Saudi names (e.g. "Al-Saud").
+RECEIVER_NAME_POOL = [
+    "Ahmed Alsaud", "Fatimah Alqahtani", "Mohammed Alotaibi", "Noura Alharbi",
+    "Khalid Alghamdi", "Sara Alshehri", "Faisal Alharthi", "Reem Aldosari",
+]
+
 # Each tuple is (length, width, height) with length > width > height, as
 # specified -- picked as a whole combo, never mixed-and-matched.
 DIMENSION_COMBO_POOL = [
