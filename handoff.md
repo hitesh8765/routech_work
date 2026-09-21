@@ -207,19 +207,26 @@ routech-automation/
 
 The framework was built from a **live DevTools capture**, but several
 **response bodies expired from Chrome's network buffer** before they were
-read (captured request payloads, not responses, for these):
+read (captured request payloads, not responses, for these). Status as of
+the first real live test runs (2026-09-18):
 
-- `POST /bookings/add` response shape — needed to know the real key for
-  `booking_id`, and the amount/unique_id fields needed by the payment call.
-  `_extract_booking_id()` / `_extract_payment_fields()` in
-  `test_parcel_booking.py` guess common key names and will need adjusting.
-- `POST /bookings/get_delivery_and_rate` response shape — needed to know
-  the real per-partner rate key names (assumed to mirror the
-  `delivery_rate_*` field names used in the final submit, but unconfirmed).
-- `POST /bookings/make_ppd_payment` response shape — used only for a
-  smoke assertion right now (`is not None`), not a hard schema check yet.
-- `GET /bookings/get_hs_codes` response shape — `_first_hs_code()` guesses
-  a `{code: ...}`-ish list shape.
+- ~~`POST /bookings/add` response shape~~ **CONFIRMED** — see §4 above.
+  `_extract_booking_id()` now uses the confirmed `booking_detail[0].booking_id`
+  path; `make_ppd_payment()` now consumes the response's own `payment_array`
+  directly instead of reassembling fields by hand.
+- ~~`GET /bookings/get_hs_codes` response shape~~ **CONFIRMED**:
+  `{'status': 'success', 'result': [{'id': '<hs code>', ...}, ...]}`.
+- `POST /bookings/get_delivery_and_rate` response shape — **still
+  unconfirmed**. Needed to know the real per-partner rate key names
+  (assumed to mirror the `delivery_rate_*` field names used in the final
+  submit, but this is still a guess). Notably, the confirmed
+  `create_booking` payload showed every `delivery_rate_*` field submitted
+  as an **empty string** even for a successful booking — so this data may
+  not actually matter much for a happy-path test; worth confirming but
+  lower priority now.
+- `POST /bookings/make_ppd_payment` response shape — **still unconfirmed**.
+  Currently only smoke-asserted (`is not None`) in the test. Next thing to
+  pin down once the payment call itself is confirmed to succeed end-to-end.
 
 **Fix strategy:** run `test_create_parcel_booking` once, `print()` (or
 debugger) each raw response the first time it's hit, then tighten the
@@ -227,6 +234,36 @@ extraction helpers and `RoutechAPIClient` docstrings to match reality.
 This should be a quick pass, not a redesign — the request side is solid.
 
 **Confirmed since (live run, first real test execution):**
+- **`/bookings/add` SUCCESS response shape (fully confirmed via a real
+  successful booking, 2026-09-18):** flat JSON (no `result`/`data`
+  wrapper), including:
+  - `booking_detail[0].booking_id` — the reliable booking id path (also
+    present, pre-generated, even on validation-error responses).
+  - **`payment_array`** — a server-pre-built list ready to pass straight
+    into `/bookings/make_ppd_payment`'s `payment_array` field, e.g.
+    `[{"booking_id", "ppd_amount", "unique_id", "booking_type", "wallet_amount"}]`.
+    **No need to reassemble this by hand** — `RoutechAPIClient.make_ppd_payment()`
+    now takes the whole `create_booking()` response and reuses this array
+    directly.
+  - `wallet_data` — clean float, the account's *current total wallet
+    balance* (NOT the amount owed for this booking). This is what the
+    payment call's top-level `wallet_amount` form field should be.
+  - The amount actually charged for the booking is
+    `payment_array[0].ppd_amount` (maps to the payment call's `amount`
+    field).
+  - **Top-level `status` can read `"error"` even on a fully successful
+    booking creation** (booking_id, full booking_detail, payment_array
+    all present) — this apparently just means "booking created, payment
+    not yet completed", not an API failure. The ONLY reliable error
+    signal is `status == "error"` **combined with** a `message` and/or
+    `req_data` key being present (those two only appear on genuine
+    validation failures). `_raise_if_error_status()` in the test file
+    encodes this distinction.
+  - Other fields present: `goods_value`, `base_goods_value`,
+    `vat_percentage`, `insurance_amount`, `platform_fees`, `vat_amount`,
+    `fuel_surcharge_amount`, `fuel_surcharge_details`, `tabby_payments`
+    (Tabby installment plan details, irrelevant to our wallet-payment path),
+    `offer_details`, `isDomesticBooking`.
 - `/bookings/add` **error** response shape:
   `{'status': 'error', 'message': [{'param', 'msg', 'key'}, ...], 'req_data': {...full echoed request, WITH a server-generated booking_id already nested inside req_data.booking_detail[0].booking_id...}}`.
   Strong signal the **success** shape nests `booking_id` the same way
@@ -238,19 +275,54 @@ This should be a quick pass, not a redesign — the request side is solid.
   `data/booking_payloads.py` was fixed accordingly (no hyphens/apostrophes).
 - `get_hs_codes` confirmed shape: `{'status': 'success', 'result': [{'id': '<hs code>', ...}, ...]}`.
 
-**Open hypothesis (unconfirmed) — Saudi dropoff using a saved location fails:**
-When `saudi_side="dropoff"`, reusing one of the account's own **saved
-pickup-location** entries verbatim as the dropoff produced:
-`dropoff_address: "Please enter valid location."` — while the exact same
-approach with a non-Saudi (India) dropoff succeeded. Working theory: the
-server may reject a dropoff address that exactly matches one of the
-account's own registered pickup/business locations (can't ship to your
-own address?). NOT yet confirmed — needs either (a) a live recon of a
-real UI booking with an international pickup + Saudi dropoff to diff the
-payload, or (b) trying a Saudi dropoff address that ISN'T one of the
-saved pickup locations (e.g. via the `/bookings/load_map` new-location
-flow instead of reusing `get_saved_locations()` for both sides). Until
-resolved, treat `saudi_side="pickup"` as the reliably-working path.
+**Saudi dropoff using a saved location — RESOLVED (2026-09-18):** earlier
+suspected as a possible "can't ship to your own saved pickup address"
+rule (a `saudi_side="dropoff"` run produced `dropoff_address: "Please
+enter valid location."`), but that error was reported *alongside* a
+`stakeholder_name` validation error in the same response. Once
+`RECEIVER_NAME_POOL` was fixed (see above), a full `pytest -m parcel -s`
+run passed **both** `pickup` and `dropoff` cases end-to-end — reusing a
+saved pickup location as the dropoff address is confirmed working for
+both directions. (Still not 100% certain whether the location error was
+a red herring caused by the multi-error response, or a real transient
+issue — if "please enter valid location" ever resurfaces on its own,
+revisit this.)
+
+**🎉 First fully working E2E Parcel booking flow confirmed (2026-09-18):**
+`pytest -m parcel -s` — 2 passed. Full chain verified live: one-time UI
+login w/ captcha → cached session reuse → saved locations → HS code
+lookup → delivery rate quote → booking creation → wallet payment →
+booking-details verification. Both Saudi-pickup and Saudi-dropoff
+directions pass.
+
+**Booking status semantics — CONFIRMED by user directly (2026-09-18):**
+- **Success** (booking went through fine): `"Sent to Carrier"`, `"Shipment Submitted"`
+- **Failure** (something went wrong post-creation): `"In Transit"`, `"Pickup Fail"`, `"Fail"`
+- Note: "In Transit" being a *failure* only makes sense as an immediate
+  post-creation sanity check — obviously a real shipment legitimately
+  being "In Transit" later in its life is normal. Don't reuse this
+  classification for anything other than "did this booking we JUST
+  created land correctly".
+- Encoded in `reporting/excel_report.py` as `SUCCESS_STATUSES` /
+  `FAILURE_STATUSES` / `is_success_status()`; `test_parcel_booking.py`
+  now asserts on this after every booking, not just logs it.
+- `extract_status_badge()` in `utils/html_parsing.py` (badge/status CSS
+  class detection + known-string fallback) was confirmed working
+  correctly on the first real run — no fix needed there.
+
+**Reporting: `reporting/excel_report.py` (added 2026-09-18):** every test
+now logs a row to `reports/booking_report.xlsx` after verification —
+columns: Booking Type, Booking Number, Route, Delivery Partner, Status,
+Created At — matching a sample report format the user provided. Re-running
+the suite appends to the same file (loads existing rows first) rather than
+overwriting. Wired in via a session-scoped `booking_report` fixture in
+`conftest.py` (saved once at session end, so a mid-run failure doesn't
+lose earlier rows). `country_label()` abbreviates "Saudi Arabia" → "Saudi"
+in the Route column specifically, confirmed from the user's sample.
+`booking_type_label()` builds e.g. `"B2C Parcel (Web)"` from
+`type_partner` + `booking_type` (channel hardcoded to "Web" since we only
+automate the web/API path). Reuse these helpers for Pallet/Luggage/
+Documents rather than duplicating the labeling logic per booking type.
 
 **Not yet built:**
 - `/bookings/load_map` flow (fresh/international location via Google Maps

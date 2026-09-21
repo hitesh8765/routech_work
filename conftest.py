@@ -15,6 +15,20 @@ import pytest
 
 from core.auth import ensure_logged_in
 from api.client import RoutechAPIClient
+from reporting.excel_report import BookingReport
+
+
+@pytest.fixture(scope="session")
+def booking_report():
+    """
+    Shared Excel report across the whole test session. Tests call
+    `booking_report.add_row(...)` after verifying a booking; the report
+    is written to reports/booking_report.xlsx once, here, at session end
+    (so a mid-run failure doesn't lose earlier rows).
+    """
+    report = BookingReport()
+    yield report
+    report.save()
 
 
 @pytest.fixture(scope="session")

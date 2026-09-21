@@ -32,6 +32,7 @@ from data.booking_payloads import (
     RECEIVER_NAME_POOL,
 )
 from utils.html_parsing import saudi_locations, non_saudi_locations
+from reporting.excel_report import booking_type_label, route_label, delivery_partner_label, is_success_status
 
 DEBUG_DIR = Path(__file__).resolve().parent.parent.parent.parent / ".auth"
 DEBUG_DIR.mkdir(exist_ok=True)
@@ -82,21 +83,6 @@ def _first_hs_code(hs_code_response) -> str:
     )
 
 
-def _unwrap(response: dict) -> dict:
-    """
-    The site consistently wraps payloads as {'status': 'success', 'result': ...}
-    (confirmed via get_hs_codes). Try that first, then fall back to a bare
-    'data' key, then the response itself if neither wrapper is present.
-    """
-    if not isinstance(response, dict):
-        return response
-    for key in ("result", "data"):
-        inner = response.get(key)
-        if isinstance(inner, dict):
-            return inner
-    return response
-
-
 def _raise_if_error_status(response: dict, context: str):
     """
     Confirmed error shape from a real /bookings/add validation failure:
@@ -122,53 +108,26 @@ def _raise_if_error_status(response: dict, context: str):
     raise AssertionError(f"{context} returned an error status -- {details}")
 
 
-def _find_booking_id(response: dict):
-    """
-    Confirmed (even on error responses): the server echoes/generates
-    booking_id nested at result.booking_detail[0].booking_id (and, on
-    error, at req_data.booking_detail[0].booking_id). Check the flat level
-    first, then dig into booking_detail[0] as a fallback.
-    """
-    flat = _unwrap(response)
-    for key in ("booking_id", "_id", "id"):
-        if key in flat:
-            return flat[key]
-
-    booking_detail = flat.get("booking_detail")
-    if isinstance(booking_detail, list) and booking_detail:
-        first = booking_detail[0]
-        if isinstance(first, dict) and "booking_id" in first:
-            return first["booking_id"]
-
-    return None
-
-
 def _extract_booking_id(create_response: dict) -> str:
-    booking_id = _find_booking_id(create_response)
-    if booking_id:
-        return str(booking_id)
+    """
+    Confirmed reliable path (2026-09-18 live run):
+        create_response['booking_detail'][0]['booking_id']
+    """
+    booking_detail = create_response.get("booking_detail")
+    if isinstance(booking_detail, list) and booking_detail:
+        booking_id = booking_detail[0].get("booking_id")
+        if booking_id:
+            return str(booking_id)
     raise AssertionError(
         f"Could not find booking_id in create_booking response: {create_response!r} "
-        "-- inspect the real shape (try printing create_response directly) and fix _extract_booking_id()."
+        "-- inspect the real shape and fix _extract_booking_id()."
     )
-
-
-def _extract_payment_fields(create_response: dict) -> dict:
-    """Pulls whatever the payment call needs (ppd_amount, unique_id, wallet_amount) out of the create response."""
-    flat = _unwrap(create_response)
-    booking_detail = flat.get("booking_detail")
-    nested = booking_detail[0] if isinstance(booking_detail, list) and booking_detail else {}
-    return {
-        "ppd_amount": flat.get("ppd_amount") or flat.get("amount") or nested.get("ppd_amount"),
-        "unique_id": flat.get("unique_id") or nested.get("unique_id"),
-        "wallet_amount": flat.get("wallet_amount") or flat.get("wallet_balance") or nested.get("wallet_amount"),
-    }
 
 
 @pytest.mark.api
 @pytest.mark.parcel
 @pytest.mark.parametrize("saudi_side", ["pickup", "dropoff"])
-def test_create_parcel_booking(api_client, saudi_side):
+def test_create_parcel_booking(api_client, saudi_side, booking_report):
     """Creates one Parcel booking with the Saudi leg alternated via parametrize."""
 
     # 1. saved locations
@@ -233,23 +192,13 @@ def test_create_parcel_booking(api_client, saudi_side):
     _dump_debug("create_booking_response", create_response)
     _raise_if_error_status(create_response, context="create_booking")
     booking_id = _extract_booking_id(create_response)
-    payment_fields = _extract_payment_fields(create_response)
-    _dump_debug("payment_fields", payment_fields)
-    assert payment_fields["ppd_amount"] is not None, (
-        f"Could not extract ppd_amount from create_booking response -- "
-        f"see .auth/debug_create_booking_response.json for the full payload."
+    assert create_response.get("payment_array"), (
+        "create_booking response has no payment_array -- "
+        "see .auth/debug_create_booking_response.json for the full payload."
     )
 
-    # 5. pay via wallet
-    payment_response = api_client.make_ppd_payment(
-        booking_id=booking_id,
-        ppd_amount=float(payment_fields["ppd_amount"] or 0),
-        unique_id=payment_fields["unique_id"] or "",
-        booking_type="parcel",
-        wallet_amount=float(payment_fields["wallet_amount"] or 0),
-        amount=float(payment_fields["ppd_amount"] or 0),
-        is_wallet=True,
-    )
+    # 5. pay via wallet (server already built the exact payment_array we need)
+    payment_response = api_client.make_ppd_payment(create_response, is_wallet=True)
     _dump_debug("make_ppd_payment_response", payment_response)
     assert payment_response is not None
 
@@ -260,3 +209,20 @@ def test_create_parcel_booking(api_client, saudi_side):
     details_html = api_client.get_booking_details_html(booking_id)
     assert "Parcel" in details_html
     assert receiver_name.split()[0] in details_html or True  # receiver name isn't always echoed verbatim; booking_number is the strong signal
+
+    # 7. log to the Excel report (log first, so we have a record even if the status check below fails)
+    status = api_client.booking_status_from_details(booking_id)
+    booking_report.add_row(
+        booking_type=booking_type_label(
+            booking_type="parcel",
+            type_partner=booking_detail.get("type_partner", "b2c"),
+        ),
+        booking_number=booking_number,
+        route=route_label(pickup.get("country", ""), dropoff.get("country", "")),
+        delivery_partner=delivery_partner_label(booking_detail.get("delivery_partners", "")),
+        status=status,
+    )
+    assert is_success_status(status), (
+        f"Booking {booking_number} landed on status {status!r}, expected a success "
+        f"status (Sent to Carrier / Shipment Submitted). Check .auth/debug_*.json for details."
+    )

@@ -91,3 +91,39 @@ def saudi_locations(locations: list[dict]) -> list[dict]:
 
 def non_saudi_locations(locations: list[dict]) -> list[dict]:
     return [loc for loc in locations if loc.get("country_code", "").upper() != "SA"]
+
+
+# Known status values seen across the app (dashboard/bookings list, booking
+# detail popups): used as a fallback for extract_status_badge() when the
+# markup's badge/status class name can't be reliably matched.
+KNOWN_BOOKING_STATUSES = [
+    "Sent to Carrier", "Shipment Submitted", "In Transit",
+    "Delivered", "Cancelled", "Pending", "Out For Delivery",
+    "Picked Up", "Booking Confirmed",
+]
+
+
+def extract_status_badge(html: str) -> Optional[str]:
+    """
+    Best-effort extraction of the booking status text (e.g. "Shipment
+    Submitted", "In Transit", "Sent to Carrier") from a booking-details
+    HTML fragment (GET /bookings/get_booking_details/:id).
+
+    NOT yet confirmed against real markup (the exact badge element/class
+    wasn't captured during recon) -- tries common badge-ish class names
+    first, then falls back to searching for a known status string
+    verbatim anywhere in the HTML. If this returns None on a real
+    booking, inspect the actual HTML and tighten the class-name match.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    for el in soup.find_all(["span", "div"], class_=True):
+        classes = " ".join(el.get("class", []))
+        if "badge" in classes.lower() or "status" in classes.lower():
+            text = el.get_text(strip=True)
+            if text:
+                return text
+
+    for status in KNOWN_BOOKING_STATUSES:
+        if status in html:
+            return status
+    return None

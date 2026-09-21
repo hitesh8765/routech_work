@@ -36,7 +36,7 @@ from typing import Optional
 from playwright.sync_api import sync_playwright, APIRequestContext
 
 from config import settings
-from utils.html_parsing import extract_csrf_token, parse_pickup_locations
+from utils.html_parsing import extract_csrf_token, parse_pickup_locations, extract_status_badge
 
 
 class RoutechAPIClient:
@@ -227,38 +227,50 @@ class RoutechAPIClient:
 
     def make_ppd_payment(
         self,
-        booking_id: str,
-        ppd_amount: float,
-        unique_id: str,
-        booking_type: str,
-        wallet_amount: float,
-        amount: float,
+        create_response: dict,
         is_wallet: bool = True,
         pay_online: bool = False,
     ) -> dict:
         """
         POST /bookings/make_ppd_payment  (multipart/form-data)
 
-        Mirrors the captured "Pay By Wallet" flow. Tabby-specific fields
-        are omitted since we're not exercising that path.
+        CONFIRMED via a real captured create_booking response (2026-09-18):
+        the response already contains a ready-made `payment_array`, e.g.:
+
+            "payment_array": [{
+                "booking_id": "...", "ppd_amount": 861.5295,
+                "unique_id": "815536", "booking_type": "parcel",
+                "wallet_amount": 14313.78
+            }]
+
+        ...plus a top-level `wallet_data` (clean float, the account's
+        current wallet balance -- NOT the amount charged). We pass
+        `payment_array` straight through rather than reassembling it by
+        hand. `amount` (the actual charge) = payment_array[0]['ppd_amount'].
+        `wallet_amount` (top-level form field) = `wallet_data`.
+
+        NOTE: top-level `status` on the create_booking response is
+        confirmed to read "error" even for a fully successful booking
+        creation (no `message`/`req_data` present in that case) -- this is
+        apparently how the server flags "booking created, payment not yet
+        completed", not an API failure. See handoff.md.
         """
-        payment_array = json.dumps(
-            [
-                {
-                    "booking_id": booking_id,
-                    "ppd_amount": ppd_amount,
-                    "unique_id": unique_id,
-                    "booking_type": booking_type,
-                    "wallet_amount": wallet_amount,
-                }
-            ]
-        )
+        payment_array = create_response.get("payment_array")
+        if not payment_array:
+            raise RuntimeError(
+                "create_booking response has no 'payment_array' -- "
+                f"full response: {create_response!r}"
+            )
+        entry = payment_array[0]
+        wallet_amount = create_response.get("wallet_data", entry.get("wallet_amount"))
+        amount = entry.get("ppd_amount")
+
         multipart = {
             "is_wallet": "true" if is_wallet else "false",
             "pay_online": "1" if pay_online else "0",
             "wallet_amount": str(wallet_amount),
             "amount": str(amount),
-            "payment_array": payment_array,
+            "payment_array": json.dumps(payment_array),
             "payment_type": json.dumps(["wallet"] if is_wallet else ["online"]),
         }
         resp = self.request.post("/bookings/make_ppd_payment", multipart=multipart)
@@ -283,3 +295,8 @@ class RoutechAPIClient:
         html = self.get_booking_details_html(booking_id)
         match = re.search(r"<strong>(\d{5,})</strong>", html)
         return match.group(1) if match else None
+
+    def booking_status_from_details(self, booking_id: str) -> Optional[str]:
+        """Convenience: extracts the booking's status text (e.g. 'Shipment Submitted')."""
+        html = self.get_booking_details_html(booking_id)
+        return extract_status_badge(html)
