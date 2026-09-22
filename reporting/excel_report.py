@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from openpyxl import Workbook, load_workbook
+from openpyxl import Workbook
 
 REPORT_PATH = Path(__file__).resolve().parent.parent / "reports" / "booking_report.xlsx"
 
@@ -89,25 +89,16 @@ def route_label(pickup_country: str, dropoff_country: str) -> str:
 
 class BookingReport:
     """
-    Accumulates one row per created booking. Loads any existing rows from
-    a prior run first (so repeated `pytest` runs build up one running
-    report rather than overwriting it), appends new rows via add_row(),
-    and writes them all back out via save().
-
-    Typical usage (see conftest.py's session-scoped `booking_report`
-    fixture): tests call `booking_report.add_row(...)` after verifying a
-    booking; the fixture's finalizer calls `.save()` once at session end.
+    Accumulates one row per created booking, for the CURRENT test session
+    only. Per the user's explicit instruction (2026-09-22): every full
+    `pytest` run starts a FRESH report -- it does NOT load/append to a
+    prior run's file. (Contrast with data/diversity_tracker.py's rotation
+    state, which DOES persist across runs -- those are separate concerns.)
     """
 
     def __init__(self, path: Path = REPORT_PATH):
         self.path = path
         self._rows: list = []
-        if self.path.exists():
-            wb = load_workbook(self.path)
-            ws = wb.active
-            for row in ws.iter_rows(min_row=2, values_only=True):
-                if row and row[0] is not None:
-                    self._rows.append(list(row))
 
     def add_row(
         self,

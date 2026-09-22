@@ -77,8 +77,16 @@ def random_dimensions() -> tuple:
 
 
 def random_receiver_mobile() -> str:
-    """10 digits total, starting with '96' (matches the walkthrough rule)."""
-    rest = "".join(str(random.randint(0, 9)) for _ in range(8))
+    """
+    Starts with '96' (original walkthrough rule). Total length randomized
+    between 9 and 10 digits per the user's explicit "be flexible with 9
+    and 10 digit" instruction (2026-09-22) -- the server started rejecting
+    our previous fixed-10-digit numbers with "must be 9 digits", but rather
+    than commit to one length, we vary it to see what's actually accepted.
+    """
+    total_length = random.choice([9, 10])
+    rest_length = total_length - 2  # "96" prefix takes 2
+    rest = "".join(str(random.randint(0, 9)) for _ in range(rest_length))
     return f"96{rest}"
 
 
@@ -90,27 +98,24 @@ def random_item() -> dict:
     }
 
 
-def pick_pickup_dropoff(saudi_locations: list, intl_locations: list, saudi_side: Literal["pickup", "dropoff"]):
+def arrange_pickup_dropoff(saudi_location: dict, intl_location: dict, saudi_side: Literal["pickup", "dropoff"]):
     """
-    Enforces the "exactly one side is Saudi" rule. Pass saudi_side="pickup"
-    or "dropoff" explicitly from the test (e.g. alternate per test via
-    pytest.mark.parametrize) rather than randomizing here, so test runs
-    stay reproducible/explainable.
+    Arranges an already-chosen Saudi location and non-Saudi location into
+    (pickup, dropoff) order based on which side should be Saudi.
+
+    NOTE: location SELECTION itself (which Saudi/non-Saudi location to use)
+    is handled by data/diversity_tracker.py's next_fresh_location() --
+    this function only arranges two already-picked locations. It used to
+    also pick randomly itself (see git history / handoff.md), but that was
+    superseded by the diversity tracker's cooldown-aware picking.
     """
-    if not saudi_locations:
-        raise ValueError("No saved Saudi Arabia locations available on this account.")
-    if not intl_locations:
-        raise ValueError("No saved non-Saudi locations available on this account.")
-
-    saudi_loc = random.choice(saudi_locations)
-    intl_loc = random.choice(intl_locations)
-
     if saudi_side == "pickup":
-        return saudi_loc, intl_loc  # pickup, dropoff
-    return intl_loc, saudi_loc
+        return saudi_location, intl_location  # pickup, dropoff
+    return intl_location, saudi_location
 
 
-def build_parcel_booking_detail(
+def build_booking_detail(
+    booking_type: str,
     pickup_location: dict,
     dropoff_location: dict,
     receiver_name: str,
@@ -119,18 +124,30 @@ def build_parcel_booking_detail(
     delivery_partner: str = "ups",
     sender_name: str = "Neeraj Sharma",
     sender_country_code: str = "+966",
-    sender_mobile_number: str = "8005820010",
+    sender_mobile_number: str = "800582001",  # confirmed real value shown on the site (2026-09-22) -- was "8005820010" (10 digits) until the server started requiring 9-digit numbers; user confirmed the site's own displayed value is this with the trailing 0 dropped
 ) -> dict:
     """
-    Builds the exact `booking_detail[0]` dict shape captured from the live
-    POST /bookings/add request. `pickup_location` / `dropoff_location` are
-    dicts as returned by utils.html_parsing.parse_pickup_locations() (or an
-    equivalent shape for a freshly-geocoded international address).
+    Builds the exact `booking_detail[0]` dict shape captured live for both
+    Parcel and Pallet (confirmed 2026-09-21: Pallet's request is identical
+    to Parcel's except `booking_type` and the absence of
+    `pallet_container_id`, which real capture showed is NOT pallet-specific
+    despite the name -- included here only for booking_type=="parcel" to
+    preserve exact fidelity per type without risking anything that already
+    works). `pickup_location` / `dropoff_location` are dicts as returned by
+    utils.html_parsing.parse_pickup_locations() (or an equivalent shape for
+    a freshly-geocoded international address).
 
     `delivery_rates` should be the dict returned by
     RoutechAPIClient.get_delivery_and_rate() -- its per-partner rate keys
     are merged straight into the payload (mirrors what the UI does: it
     echoes back every partner's quote, not just the chosen one).
+
+    NOTE: real capture also showed `sender_country_code` varying by pickup
+    location in the live UI (e.g. "+61" for an Australia pickup) rather
+    than a fixed "+966" -- but our automated tests already pass reliably
+    with a hardcoded value across multiple country pairs, so this default
+    is left as-is rather than adding a country->dial-code mapping for
+    something that isn't blocking anything. See handoff.md.
     """
     item = random_item()
     actual_weight = random_actual_weight()
@@ -166,8 +183,7 @@ def build_parcel_booking_detail(
         "item_weight": "",
         "is_location_unknown": "0",
         # -- booking meta --
-        "booking_type": "parcel",
-        "pallet_container_id": "",
+        "booking_type": booking_type,
         # -- receiver ("stakeholder") --
         "stakeholder_name": receiver_name,
         "country_code": "+966",
@@ -215,9 +231,24 @@ def build_parcel_booking_detail(
         "delivery_partners": delivery_partner,
     }
 
+    if booking_type == "parcel":
+        detail["pallet_container_id"] = ""
+
     # Merge in whatever per-partner rates the get_delivery_and_rate() call
     # returned (UI echoes all quoted rates back, not just the chosen one).
     for field in DELIVERY_PARTNER_RATE_FIELDS:
         detail[field] = str(delivery_rates.get(field, "")) if delivery_rates.get(field) not in (None, "") else ""
 
     return detail
+
+
+def build_parcel_booking_detail(**kwargs) -> dict:
+    return build_booking_detail(booking_type="parcel", **kwargs)
+
+
+def build_pallet_booking_detail(**kwargs) -> dict:
+    """
+    Confirmed identical to Parcel's request shape (2026-09-21 live capture)
+    except booking_type and no pallet_container_id -- see build_booking_detail().
+    """
+    return build_booking_detail(booking_type="pallet", **kwargs)

@@ -324,15 +324,144 @@ in the Route column specifically, confirmed from the user's sample.
 automate the web/API path). Reuse these helpers for Pallet/Luggage/
 Documents rather than duplicating the labeling logic per booking type.
 
+**Pallet booking type — CONFIRMED working (2026-09-21):** live recon
+session (user drove the real UI manually, framework watched DevTools) then
+`tests/api/bookings/test_pallet_booking.py` built and passing. Key finding:
+Pallet's `/bookings/add` payload is **structurally identical to Parcel's**
+— same field names throughout, same endpoints
+(`booking_form`/`get_hs_codes`/`get_delivery_and_rate`/`make_ppd_payment`/
+`get_booking_details`), only difference is `booking_type: "pallet"` and the
+absence of `pallet_container_id` (that field turned out NOT to be
+pallet-specific despite the name — real capture confirms Pallet bookings
+don't send it at all; harmless either way since it's just an extra empty
+field). `data/booking_payloads.py` was refactored: `build_booking_detail()`
+is now the shared implementation, with `build_parcel_booking_detail()` and
+`build_pallet_booking_detail()` as thin per-type wrappers — reuse this
+pattern for Luggage/Documents rather than writing a new builder from
+scratch, unless recon reveals real structural differences.
+
+Also observed live: `sender_country_code` varies by pickup location in the
+real UI (e.g. `"+61"` for an Australia pickup) rather than the `"+966"` we
+hardcode — but our tests already pass reliably with the hardcoded value
+across multiple country pairs, so this was deliberately left as-is (not
+worth the complexity of a country→dial-code mapping for something that
+isn't blocking anything). `get_delivery_and_rate` was also observed to
+fire twice in one real booking and to be accompanied by 1-3
+`POST /bookings/get_item_weights` calls — neither appears in the actual
+`/bookings/add` payload, so neither was implemented; they look like
+supplementary/informational calls, not required for booking creation.
+
+**Diversity rules — SUPERSEDED/refined by the user (2026-09-22), stricter
+than the original 2026-09-21 version:** the rules now apply PER BOOKING,
+not per booking type. Confirmed directly by the user:
+- Every booking must use a genuinely different pickup/dropoff **location**
+  (not just a different country) than recent bookings — prefer well-known/
+  popular places (illustrative example given: Tokyo). We can't
+  algorithmically judge "popularity" of a saved location, so this picks
+  randomly among not-recently-used ones from the account's existing saved
+  locations — **if the user wants genuinely new popular-city locations
+  added (not just cycling the account's existing saved list), that needs
+  the `/bookings/load_map` geocoding flow implemented — currently not
+  built, see below.**
+- Non-Saudi location reuse cooldown: ~15-20 other distinct non-Saudi
+  locations used first (implemented as 17).
+- Saudi location reuse cooldown: ~6-8 other distinct Saudi locations used
+  first (implemented as 7).
+- Saudi side (pickup/dropoff) must **strictly alternate**, globally, across
+  ALL bookings regardless of type — NOT random. If booking N had Saudi as
+  pickup, booking N+1 (whatever type) must have Saudi as dropoff.
+- A different delivery partner every single booking (not just per type) —
+  round-robin through every partner before any repeat.
+- **DHL (plain "DHL" AND every `dhl_*` variant) is intentionally EXCLUDED
+  from selection for now** — kept in the codebase/labels
+  (`reporting/excel_report.py`'s `DELIVERY_PARTNER_LABELS`) for future use,
+  just never picked, until the user says otherwise.
+
+Implemented in `data/diversity_tracker.py` (rewritten 2026-09-22,
+superseding the original country/partner-only version), persisted to
+`reports/diversity_state.json` (survives across separate `pytest` runs).
+Three atomic functions (each both picks AND records in one call, so tests
+can't forget to record and leave state inconsistent):
+- `next_saudi_side()` — strict global alternation.
+- `next_fresh_location(locations, is_saudi)` — cooldown-aware pick.
+- `next_delivery_partner()` — round-robin (DHL excluded).
+Plus `set_last_saudi_side(side)`, used only by Parcel's test since its own
+`pytest.mark.parametrize` covers both directions every run by design
+(valuable regression coverage) rather than reading the global alternator —
+it calls this after each parametrized run so the global alternation stays
+in sync with reality for whichever booking type runs next.
+
+`data/booking_payloads.py`'s old `pick_pickup_dropoff()` (which picked
+randomly itself) was renamed to `arrange_pickup_dropoff()` and now only
+arranges two ALREADY-picked locations into (pickup, dropoff) order —
+selection itself is the tracker's job now.
+
+State was backfilled with real history predating this tracker (Parcel x2 +
+Pallet x1): `last_saudi_side: "pickup"` (Pallet's actual last run), and
+`partner_rotation_index: 2` (skipping past `ups` and `aramex`, which
+Parcel/Pallet already used, so the next fresh pick starts at `fedex`).
+
+**Excel report resets every run (confirmed by user, 2026-09-22):**
+`reporting/excel_report.py`'s `BookingReport` no longer loads/appends to a
+prior run's file — every `pytest` session starts a fresh
+`reports/booking_report.xlsx`. This is DIFFERENT from the diversity
+tracker's state, which DOES persist across runs — don't conflate the two
+when editing either file.
+
+**Mobile number validation changed mid-project (discovered 2026-09-22):**
+the exact same `sender_mobile_number` ("8005820010", 10 digits) and
+`stakeholders`/receiver numbers (10 digits starting with "96") that
+succeeded in every earlier booking (§5-8 above) started being uniformly
+rejected with `"Invalid mobile number. Mobile number must be 9 digits."`
+on BOTH fields, consistently across repeated runs (ruled out as flaky —
+same error 3/3 times). Nothing in our code changed for these fields
+between the working runs and this — points to the demo site's own
+validation rule changing server-side. Fixed per user's direct
+confirmation (2026-09-22):
+- `sender_mobile_number` default in `build_booking_detail()` changed from
+  `"8005820010"` to `"800582001"` (9 digits) — user checked the live
+  Add Booking → Parcel form and confirmed this is the field's real
+  pre-filled value with the trailing 0 dropped. Still hardcoded, not
+  scraped — if it changes again, re-check the live form rather than
+  re-guessing.
+- `random_receiver_mobile()` in `data/booking_payloads.py` now randomizes
+  between 9 and 10 total digits (still starting with "96") per the user's
+  explicit "be flexible with 9 digit and 10 digit" instruction — rather
+  than commit to one length, both are tried across runs. **Not yet
+  re-confirmed live post-fix** — run the suite and check whether both
+  lengths are actually accepted, or only 9; if only 9, narrow
+  `random_receiver_mobile()` to just 9 digits.
+
+**`make_ppd_payment` response shape — CONFIRMED (2026-09-21 live run):**
+```json
+{"status": true, "online": 0, "wallet": <float>, "paymentArray": [...], "is_wallet": true, "goods_value": <float>}
+```
+Note `status` is a **boolean** here (`true`), unlike `create_booking`'s
+string-based status convention — don't conflate the two. Both Parcel and
+Pallet tests now assert `payment_response.get("status") is True` instead
+of the old weak `is not None` check.
+
+**Every new booking-type test must call `next_saudi_side()` (or
+`set_last_saudi_side()` if parametrizing both directions itself),
+`next_fresh_location()` for both sides, and `next_delivery_partner()`** —
+see `test_pallet_booking.py` for the pattern to copy.
+
 **Not yet built:**
 - `/bookings/load_map` flow (fresh/international location via Google Maps
   pin-drop) — current tests only use the account's already-saved locations
   for both the Saudi and non-Saudi side, which satisfies the business rule
-  without needing to reverse-engineer Google Maps geocoding calls. Revisit
-  if we ever need a genuinely new (not-yet-saved) address in a test.
+  without needing to reverse-engineer Google Maps geocoding calls. **The
+  user's "popular place like Tokyo" instruction (2026-09-22) may want this
+  built for genuinely new locations rather than only cycling the account's
+  existing saved list — ask the user if this is wanted before building it,
+  it's a meaningfully bigger feature (Google Places integration).**
 - C2C flow — endpoint name assumed (`/login/individual`), not yet
   confirmed live.
-- Pallet / Luggage / Documents booking types — only Parcel is done.
+- Luggage / Documents booking types — Parcel and Pallet are done; these
+  two remain. Given how identical Parcel/Pallet turned out to be, try a
+  live recon first (same pattern as Pallet's) before assuming — Luggage in
+  particular might have genuinely different fields (dimensions per piece,
+  luggage count) worth confirming rather than assuming.
 - Bulk Booking, Manifest List, Sub-Account, Wallet, Offers — untouched.
 
 ## 9. Environment notes

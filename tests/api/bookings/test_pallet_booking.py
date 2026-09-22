@@ -1,27 +1,28 @@
 """
-E2E API test for Parcel booking creation (B2B account).
+E2E API test for Pallet booking creation (B2B account).
 
-Flow (all via API, session captured once via UI login + manual captcha):
-    1. Fetch saved business locations (GET via /bookings/booking_form)
-    2. Pick one Saudi + one non-Saudi location, respecting per-booking
-       reuse cooldowns (data/diversity_tracker.py: next_fresh_location)
-    3. Look up an HS code matching our random item name
-    4. Get delivery partner rates for our random weight/dimensions
-    5. Build the full booking_detail payload, using the next delivery
-       partner in the rotation (DHL excluded -- see diversity_tracker.py)
-    6. POST /bookings/add -> create the booking
-    7. POST /bookings/make_ppd_payment -> pay via wallet
-    8. GET /bookings/get_booking_details/:id -> verify it landed correctly
-    9. Log to reports/booking_report.xlsx (fresh every test session)
+Confirmed via live recon (2026-09-21, user drove the UI manually while
+this framework watched DevTools): Pallet's /bookings/add payload is
+IDENTICAL to Parcel's except `booking_type: "pallet"` (and the absence of
+`pallet_container_id`, which turned out not to be pallet-specific despite
+the name -- see handoff.md). Same booking_form / get_hs_codes /
+get_delivery_and_rate / make_ppd_payment / get_booking_details endpoints,
+same field names throughout.
 
-NOTE on Saudi-side alternation: this test's own pytest.mark.parametrize
-already covers BOTH directions every run (valuable regression coverage for
-Parcel specifically), so it does NOT read data/diversity_tracker.py's
-next_saudi_side() to decide its own direction. It DOES call
-set_last_saudi_side() after each parametrized run so the GLOBAL alternation
-stays in sync with reality for whichever booking type runs next.
+Diversity rules (given by the user, refined 2026-09-22) -- these apply
+PER BOOKING, not per booking type:
+    - Saudi side (pickup/dropoff) must strictly ALTERNATE from whatever
+      the previous booking (of ANY type) used -- data/diversity_tracker.py
+      next_saudi_side().
+    - Pickup/dropoff locations must respect reuse cooldowns (~7 other
+      Saudi locations / ~17 other non-Saudi locations before a repeat) --
+      next_fresh_location().
+    - Delivery partner round-robins through every partner (DHL excluded)
+      before any repeat -- next_delivery_partner().
 
-See handoff.md for the full confirmed API contract and any open items.
+Flow is otherwise identical to test_parcel_booking.py -- see that file's
+docstring for the step-by-step breakdown, and handoff.md for the full
+confirmed API contract / open items.
 """
 import random
 
@@ -29,11 +30,11 @@ import pytest
 
 from data.booking_payloads import (
     arrange_pickup_dropoff,
-    build_parcel_booking_detail,
+    build_pallet_booking_detail,
     RECEIVER_NAME_POOL,
     ITEM_NAME_POOL,
 )
-from data.diversity_tracker import next_fresh_location, next_delivery_partner, set_last_saudi_side
+from data.diversity_tracker import next_saudi_side, next_fresh_location, next_delivery_partner
 from utils.html_parsing import saudi_locations, non_saudi_locations
 from reporting.excel_report import booking_type_label, route_label, delivery_partner_label, is_success_status
 from tests.api.bookings.booking_test_helpers import (
@@ -45,13 +46,17 @@ from tests.api.bookings.booking_test_helpers import (
 
 
 @pytest.mark.api
-@pytest.mark.parcel
-@pytest.mark.parametrize("saudi_side", ["pickup", "dropoff"])
-def test_create_parcel_booking(api_client, saudi_side, booking_report):
-    """Creates one Parcel booking with the Saudi leg alternated via parametrize."""
+@pytest.mark.pallet
+def test_create_pallet_booking(api_client, booking_report):
+    """
+    Creates one Pallet booking, driven entirely by the diversity tracker:
+    Saudi side alternates globally from the last booking of any type, the
+    specific pickup/dropoff locations respect their reuse cooldowns, and
+    the delivery partner is the next one in the rotation (DHL excluded).
+    """
 
     # 1. saved locations, picked with per-booking reuse cooldowns applied
-    all_locations = api_client.get_saved_locations(booking_type="parcel")
+    all_locations = api_client.get_saved_locations(booking_type="pallet")
     assert all_locations, "No saved business locations returned -- check booking_form response/parsing."
 
     sa_locations = saudi_locations(all_locations)
@@ -59,6 +64,7 @@ def test_create_parcel_booking(api_client, saudi_side, booking_report):
     assert sa_locations, "No saved Saudi Arabia locations available on this account."
     assert intl_locations, "No saved non-Saudi locations available on this account."
 
+    saudi_side = next_saudi_side()
     saudi_location = next_fresh_location(sa_locations, is_saudi=True)
     intl_location = next_fresh_location(intl_locations, is_saudi=False)
     pickup, dropoff = arrange_pickup_dropoff(saudi_location, intl_location, saudi_side=saudi_side)
@@ -66,9 +72,7 @@ def test_create_parcel_booking(api_client, saudi_side, booking_report):
     delivery_partner = next_delivery_partner()
     receiver_name = random.choice(RECEIVER_NAME_POOL)
 
-    # 2. HS code lookup (uses same string as item name per the rule -- but
-    #    we don't know the item name until build time, so do a lightweight
-    #    two-pass: pick item name pool value first via a throwaway call).
+    # 2. HS code lookup (uses same string as item name per the rule)
     item_name_for_lookup = random.choice(ITEM_NAME_POOL)
     hs_code_response = api_client.get_hs_codes(item_name_for_lookup)
     hs_code = first_hs_code(hs_code_response)
@@ -98,13 +102,13 @@ def test_create_parcel_booking(api_client, saudi_side, booking_report):
         "package_dimension[0][weight]": "0.4",
         "package_dimension[0][higher_weight]": "10",
         "offer_code": "",
-        "booking_type": "parcel",
+        "booking_type": "pallet",
         "is_palletized": "false",
     }
     delivery_rates = api_client.get_delivery_and_rate(rate_payload)
 
     # 4. build + create booking
-    booking_detail = build_parcel_booking_detail(
+    booking_detail = build_pallet_booking_detail(
         pickup_location=pickup,
         dropoff_location=dropoff,
         receiver_name=receiver_name,
@@ -113,17 +117,17 @@ def test_create_parcel_booking(api_client, saudi_side, booking_report):
         delivery_partner=delivery_partner,
     )
     create_response = api_client.create_booking(booking_detail)
-    dump_debug("create_booking_response", create_response)
-    raise_if_error_status(create_response, context="create_booking")
+    dump_debug("create_pallet_booking_response", create_response)
+    raise_if_error_status(create_response, context="create_booking (pallet)")
     booking_id = extract_booking_id(create_response)
     assert create_response.get("payment_array"), (
         "create_booking response has no payment_array -- "
-        "see .auth/debug_create_booking_response.json for the full payload."
+        "see .auth/debug_create_pallet_booking_response.json for the full payload."
     )
 
-    # 5. pay via wallet (server already built the exact payment_array we need)
+    # 5. pay via wallet
     payment_response = api_client.make_ppd_payment(create_response, is_wallet=True)
-    dump_debug("make_ppd_payment_response", payment_response)
+    dump_debug("make_ppd_pallet_payment_response", payment_response)
     # Confirmed real shape (2026-09-21 live run): {"status": true, "online": ..., "wallet": ..., "paymentArray": [...], ...}
     assert payment_response and payment_response.get("status") is True, (
         f"Payment did not report success: {payment_response!r}"
@@ -134,14 +138,14 @@ def test_create_parcel_booking(api_client, saudi_side, booking_report):
     assert booking_number, "Booking number not found in get_booking_details response."
 
     details_html = api_client.get_booking_details_html(booking_id)
-    assert "Parcel" in details_html
-    assert receiver_name.split()[0] in details_html or True  # receiver name isn't always echoed verbatim; booking_number is the strong signal
+    assert "Pallet" in details_html
 
-    # 7. log to the Excel report; sync the global Saudi-side alternation to what we actually just did
+    # 7. log to the Excel report (location/partner/side usage already
+    #    recorded atomically by the next_* tracker calls above)
     status = api_client.booking_status_from_details(booking_id)
     booking_report.add_row(
         booking_type=booking_type_label(
-            booking_type="parcel",
+            booking_type="pallet",
             type_partner=booking_detail.get("type_partner", "b2c"),
         ),
         booking_number=booking_number,
@@ -149,7 +153,6 @@ def test_create_parcel_booking(api_client, saudi_side, booking_report):
         delivery_partner=delivery_partner_label(booking_detail.get("delivery_partners", "")),
         status=status,
     )
-    set_last_saudi_side(saudi_side)
 
     assert is_success_status(status), (
         f"Booking {booking_number} landed on status {status!r}, expected a success "
