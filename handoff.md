@@ -401,12 +401,28 @@ Pallet x1): `last_saudi_side: "pickup"` (Pallet's actual last run), and
 `partner_rotation_index: 2` (skipping past `ups` and `aramex`, which
 Parcel/Pallet already used, so the next fresh pick starts at `fedex`).
 
-**Excel report resets every run (confirmed by user, 2026-09-22):**
-`reporting/excel_report.py`'s `BookingReport` no longer loads/appends to a
-prior run's file — every `pytest` session starts a fresh
-`reports/booking_report.xlsx`. This is DIFFERENT from the diversity
-tracker's state, which DOES persist across runs — don't conflate the two
-when editing either file.
+**Excel report persistence — SUPERSEDED, final version (2026-09-22):**
+the user initially asked for a fresh report every run, then changed this
+later the same day: `reporting/excel_report.py`'s `BookingReport` now
+**appends** to the existing `reports/booking_report.xlsx` across separate
+`pytest` sessions again (loads prior rows on init, same as the very first
+version), but now tags every row with a `"Run ID"` column (format
+`Run_YYYYMMDD_HHMMSS`, one shared value per session via
+`generate_run_id()`) so individual runs can be told apart within the one
+growing file. This is DIFFERENT from the diversity tracker's state, which
+also persists across runs but is a separate file/concern — don't conflate
+the two.
+
+**Test execution order fixed (2026-09-22):** pytest collects test files
+alphabetically by default, so `test_pallet_booking.py` was running BEFORE
+`test_parcel_booking.py` ("pallet" < "parcel" alphabetically) — breaking
+the intended Parcel→Pallet→Luggage→Documents sequence and, combined with
+Parcel's old parametrize, caused two consecutive bookings with the same
+Saudi side. Fixed by renaming with numeric prefixes:
+`test_01_parcel_booking.py`, `test_02_pallet_booking.py`. **Any new
+booking-type test file must follow this numbering** (`test_03_luggage_booking.py`,
+`test_04_documents_booking.py`) to keep the sequence correct — don't go
+back to unprefixed names.
 
 **Mobile number validation changed mid-project (discovered 2026-09-22):**
 the exact same `sender_mobile_number` ("8005820010", 10 digits) and
@@ -424,13 +440,26 @@ confirmation (2026-09-22):
   pre-filled value with the trailing 0 dropped. Still hardcoded, not
   scraped — if it changes again, re-check the live form rather than
   re-guessing.
-- `random_receiver_mobile()` in `data/booking_payloads.py` now randomizes
-  between 9 and 10 total digits (still starting with "96") per the user's
-  explicit "be flexible with 9 digit and 10 digit" instruction — rather
-  than commit to one length, both are tried across runs. **Not yet
-  re-confirmed live post-fix** — run the suite and check whether both
-  lengths are actually accepted, or only 9; if only 9, narrow
-  `random_receiver_mobile()` to just 9 digits.
+- `random_receiver_mobile()` — **SUPERSEDED again, 2026-09-22 (second
+  correction):** the 9-or-10-flexible approach was itself replaced almost
+  immediately — the real rule is the digit count must match the
+  **receiver's actual country**, not a fixed/flexible length. User gave
+  explicit examples: India (+91) 10 digits, United States (+1) 10 digits,
+  Saudi Arabia (+966) 9 digits, Spain (+34) 9 digits, Singapore (+65) 8
+  digits, Hong Kong (+852) 8 digits. Implemented as
+  `data/phone_formats.py` (`PHONE_FORMAT_BY_ISO`, keyed by the ISO
+  alpha-2 codes already on our location dicts) +
+  `random_mobile_for_country()` in `booking_payloads.py`, which replaced
+  `random_receiver_mobile()` entirely. The receiver's phone is generated
+  using the **dropoff location's** country (receiver is physically at
+  dropoff, regardless of which side is Saudi) — both the `country_code`
+  field (now a real dial code, e.g. `"+91"`, not hardcoded `"+966"`) and
+  the `stakeholders` digit count now vary per booking accordingly. The
+  table covers countries already seen in this account's saved locations
+  plus ~25 other common ones, with a documented best-effort fallback (9
+  digits) for anything not in the table — **if a new country triggers a
+  digit-count rejection, add it to `PHONE_FORMAT_BY_ISO` rather than
+  guessing; the error message states the required count.**
 
 **`make_ppd_payment` response shape — CONFIRMED (2026-09-21 live run):**
 ```json
@@ -441,10 +470,36 @@ string-based status convention — don't conflate the two. Both Parcel and
 Pallet tests now assert `payment_response.get("status") is True` instead
 of the old weak `is not None` check.
 
-**Every new booking-type test must call `next_saudi_side()` (or
-`set_last_saudi_side()` if parametrizing both directions itself),
-`next_fresh_location()` for both sides, and `next_delivery_partner()`** —
-see `test_pallet_booking.py` for the pattern to copy.
+**Parcel's parametrize REMOVED (2026-09-22, user correction):** Parcel used
+to `pytest.mark.parametrize` over both `saudi_side` values, producing 2
+bookings every run regardless of what ran before it — which broke the
+GLOBAL strict alternation (e.g. Pallet used Saudi-as-pickup, then Parcel's
+first parametrized case ALSO used Saudi-as-pickup, back to back, instead
+of flipping). Fixed: Parcel now produces exactly ONE booking per run, side
+decided by `next_saudi_side()` — identical pattern to every other booking
+type now. `set_last_saudi_side()` still exists in `diversity_tracker.py`
+but is currently unused by any test (kept in case a dedicated
+both-directions regression test is wanted later — ask the user before
+reintroducing it, don't assume). **Rule going forward: every
+booking-type test produces exactly ONE booking per full suite run.**
+
+**Status-check timing fix (2026-09-22):** a booking checked immediately
+after payment completion once showed status `"Requested"` — not in either
+confirmed status set. Working theory: async delay between payment
+completing and the booking actually processing into a terminal status
+server-side, and we were checking too fast (single immediate check).
+Fixed with `wait_for_terminal_status()` in `booking_test_helpers.py` —
+polls up to 15s (2s interval) until a known success/failure status is
+reached. **NOT YET RE-CONFIRMED** as the actual root cause — if
+`"Requested"` still shows up as the final status after the full timeout on
+a future run, this needs separate investigation (ask the user to check
+that specific booking number on the live site) rather than assuming the
+polling fix resolved it.
+
+**Every new booking-type test must call `next_saudi_side()`,
+`next_fresh_location()` for both sides, `next_delivery_partner()`, and
+`wait_for_terminal_status()` for the final status check** — see
+`test_02_pallet_booking.py` for the pattern to copy.
 
 **Not yet built:**
 - `/bookings/load_map` flow (fresh/international location via Google Maps

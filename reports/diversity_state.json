@@ -11,7 +11,13 @@
     "6a16c6be07d6682dbbc795d1",
     "69b93763d50e7a681af945b9",
     "69f871f2b4eb42cf32069960",
-    "6a28114048252e4d99248081"
+    "6a28114048252e4d99248081",
+    "69b93763d50e7a681af945a4",
+    "69e9c84540414c07fe5d6bcd",
+    "69b93763d50e7a681af945b5",
+    "6a140ebb5d002e9305cf4524",
+    "6a153bd684cb716b52222fd8",
+    "6a799b601a83b4dd57486263"
   ],
   "used_intl_location_ids": [
     "6a06bac8a62c04c4b935bd93",
@@ -25,8 +31,14 @@
     "69f09d40c30aa6adec7636fe",
     "69e767e8b1f319d8b9e7b295",
     "69f0775c47da8c25c1fcbef9",
-    "69f1fa6e4067561e682debd3"
+    "69f1fa6e4067561e682debd3",
+    "69f319ca65cc370f79aef2ac",
+    "69b93763d50e7a681af945af",
+    "6a55f5a94488f29accf594c3",
+    "6abcb8bed38a8bc8fd0f6780",
+    "69e22c935dc15f20b4595485",
+    "69f0ad30c30aa6adec763c3e"
   ],
   "last_saudi_side": "dropoff",
-  "partner_rotation_index": 3
+  "partner_rotation_index": 9
 }

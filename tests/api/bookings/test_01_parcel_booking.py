@@ -14,12 +14,15 @@ Flow (all via API, session captured once via UI login + manual captcha):
     8. GET /bookings/get_booking_details/:id -> verify it landed correctly
     9. Log to reports/booking_report.xlsx (fresh every test session)
 
-NOTE on Saudi-side alternation: this test's own pytest.mark.parametrize
-already covers BOTH directions every run (valuable regression coverage for
-Parcel specifically), so it does NOT read data/diversity_tracker.py's
-next_saudi_side() to decide its own direction. It DOES call
-set_last_saudi_side() after each parametrized run so the GLOBAL alternation
-stays in sync with reality for whichever booking type runs next.
+CHANGED (2026-09-22, per user correction): this used to
+pytest.mark.parametrize over BOTH saudi_side values, producing 2 Parcel
+bookings every run regardless of what ran before it -- which broke the
+GLOBAL strict alternation rule (e.g. Pallet used Saudi-as-pickup, then
+this test's first parametrized case ALSO used Saudi-as-pickup, back to
+back, instead of flipping). Fixed: exactly ONE booking per run now, side
+decided by next_saudi_side() just like every other booking type, so the
+whole suite's alternation sequence stays correct end to end regardless of
+which booking types run or in what order.
 
 See handoff.md for the full confirmed API contract and any open items.
 """
@@ -33,22 +36,29 @@ from data.booking_payloads import (
     RECEIVER_NAME_POOL,
     ITEM_NAME_POOL,
 )
-from data.diversity_tracker import next_fresh_location, next_delivery_partner, set_last_saudi_side
+from data.diversity_tracker import next_saudi_side, next_fresh_location, next_delivery_partner
 from utils.html_parsing import saudi_locations, non_saudi_locations
-from reporting.excel_report import booking_type_label, route_label, delivery_partner_label, is_success_status
+from reporting.excel_report import (
+    booking_type_label,
+    route_label,
+    delivery_partner_label,
+    is_success_status,
+    SUCCESS_STATUSES,
+    FAILURE_STATUSES,
+)
 from tests.api.bookings.booking_test_helpers import (
     dump_debug,
     first_hs_code,
     raise_if_error_status,
     extract_booking_id,
+    wait_for_terminal_status,
 )
 
 
 @pytest.mark.api
 @pytest.mark.parcel
-@pytest.mark.parametrize("saudi_side", ["pickup", "dropoff"])
-def test_create_parcel_booking(api_client, saudi_side, booking_report):
-    """Creates one Parcel booking with the Saudi leg alternated via parametrize."""
+def test_create_parcel_booking(api_client, booking_report):
+    """Creates exactly one Parcel booking, side/location/partner all driven by the global diversity tracker."""
 
     # 1. saved locations, picked with per-booking reuse cooldowns applied
     all_locations = api_client.get_saved_locations(booking_type="parcel")
@@ -59,6 +69,7 @@ def test_create_parcel_booking(api_client, saudi_side, booking_report):
     assert sa_locations, "No saved Saudi Arabia locations available on this account."
     assert intl_locations, "No saved non-Saudi locations available on this account."
 
+    saudi_side = next_saudi_side()
     saudi_location = next_fresh_location(sa_locations, is_saudi=True)
     intl_location = next_fresh_location(intl_locations, is_saudi=False)
     pickup, dropoff = arrange_pickup_dropoff(saudi_location, intl_location, saudi_side=saudi_side)
@@ -137,8 +148,9 @@ def test_create_parcel_booking(api_client, saudi_side, booking_report):
     assert "Parcel" in details_html
     assert receiver_name.split()[0] in details_html or True  # receiver name isn't always echoed verbatim; booking_number is the strong signal
 
-    # 7. log to the Excel report; sync the global Saudi-side alternation to what we actually just did
-    status = api_client.booking_status_from_details(booking_id)
+    # 7. log to the Excel report (location/partner/side usage already
+    #    recorded atomically by the next_* tracker calls above)
+    status = wait_for_terminal_status(api_client, booking_id, SUCCESS_STATUSES, FAILURE_STATUSES)
     booking_report.add_row(
         booking_type=booking_type_label(
             booking_type="parcel",
@@ -149,7 +161,6 @@ def test_create_parcel_booking(api_client, saudi_side, booking_report):
         delivery_partner=delivery_partner_label(booking_detail.get("delivery_partners", "")),
         status=status,
     )
-    set_last_saudi_side(saudi_side)
 
     assert is_success_status(status), (
         f"Booking {booking_number} landed on status {status!r}, expected a success "

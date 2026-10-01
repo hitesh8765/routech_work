@@ -4,6 +4,7 @@ test_pallet_booking.py, ...). Extracted here once Pallet needed the same
 logic Parcel already had, rather than duplicating per file.
 """
 import json
+import time
 from pathlib import Path
 
 DEBUG_DIR = Path(__file__).resolve().parent.parent.parent.parent / ".auth"
@@ -94,3 +95,38 @@ def extract_booking_id(create_response: dict) -> str:
         f"Could not find booking_id in create_booking response: {create_response!r} "
         "-- inspect the real shape and fix extract_booking_id()."
     )
+
+
+def wait_for_terminal_status(
+    api_client,
+    booking_id: str,
+    success_statuses: set,
+    failure_statuses: set,
+    timeout: float = 15,
+    interval: float = 2,
+):
+    """
+    Polls booking_status_from_details() until a known terminal status
+    (from either success_statuses or failure_statuses) is reached, or
+    timeout elapses.
+
+    Added 2026-09-22: a booking checked IMMEDIATELY after payment
+    completion once showed status 'Requested' -- a value not in either the
+    confirmed success set ("Sent to Carrier"/"Shipment Submitted") or
+    failure set ("In Transit"/"Pickup Fail"/"Fail"). Working theory: the
+    server takes a moment to actually process the booking into a terminal
+    status after payment, and we were checking too fast. This polls a few
+    times rather than checking once. NOT YET FULLY CONFIRMED -- if
+    'Requested' persists as the final status after the full timeout, that
+    suggests it ISN'T just a timing artifact and needs separate
+    investigation (ask the user to check that specific booking on the live
+    site) rather than assuming this fix resolves it.
+    """
+    deadline = time.time() + timeout
+    last_status = None
+    while time.time() < deadline:
+        last_status = api_client.booking_status_from_details(booking_id)
+        if last_status in success_statuses or last_status in failure_statuses:
+            return last_status
+        time.sleep(interval)
+    return last_status

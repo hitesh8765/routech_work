@@ -30,6 +30,8 @@ Field-name mapping confirmed by live capture of POST /bookings/add:
 import random
 from typing import Literal
 
+from data.phone_formats import get_phone_format
+
 ITEM_NAME_POOL = [
     "books", "furniture", "telephone", "monitor",
     "keyboard", "mouse", "fish", "sweatshirt",
@@ -76,18 +78,19 @@ def random_dimensions() -> tuple:
     return random.choice(DIMENSION_COMBO_POOL)
 
 
-def random_receiver_mobile() -> str:
+def random_mobile_for_country(iso_country_code: str) -> tuple:
     """
-    Starts with '96' (original walkthrough rule). Total length randomized
-    between 9 and 10 digits per the user's explicit "be flexible with 9
-    and 10 digit" instruction (2026-09-22) -- the server started rejecting
-    our previous fixed-10-digit numbers with "must be 9 digits", but rather
-    than commit to one length, we vary it to see what's actually accepted.
+    SUPERSEDES the old random_receiver_mobile() (2026-09-22, user
+    correction): the receiver's mobile number length must match their
+    actual country's real format (e.g. India/USA 10 digits, Saudi
+    Arabia/Spain 9 digits, Singapore/Hong Kong 8 digits), not a fixed
+    9-or-10-digit "96..." shape -- see data/phone_formats.py for the full
+    table. Returns (dial_code, local_number), e.g. ("+966", "512345678").
+    Avoids a leading 0 so the number looks like a plausible real mobile.
     """
-    total_length = random.choice([9, 10])
-    rest_length = total_length - 2  # "96" prefix takes 2
-    rest = "".join(str(random.randint(0, 9)) for _ in range(rest_length))
-    return f"96{rest}"
+    fmt = get_phone_format(iso_country_code)
+    digits = [str(random.randint(1, 9))] + [str(random.randint(0, 9)) for _ in range(fmt.digits - 1)]
+    return fmt.dial_code, "".join(digits)
 
 
 def random_item() -> dict:
@@ -153,6 +156,11 @@ def build_booking_detail(
     actual_weight = random_actual_weight()
     length, width, height = random_dimensions()
 
+    # Receiver is physically at the dropoff location, so their phone
+    # format (dial code + digit count) should match the DROPOFF country,
+    # not a fixed Saudi shape -- see data/phone_formats.py.
+    receiver_dial_code, receiver_mobile = random_mobile_for_country(dropoff_location.get("country_code", ""))
+
     detail = {
         # -- pickup --
         "pickup_location": pickup_location.get("id", ""),
@@ -186,8 +194,8 @@ def build_booking_detail(
         "booking_type": booking_type,
         # -- receiver ("stakeholder") --
         "stakeholder_name": receiver_name,
-        "country_code": "+966",
-        "stakeholders": random_receiver_mobile(),
+        "country_code": receiver_dial_code,
+        "stakeholders": receiver_mobile,
         # -- sender (auto-filled by account; just echoed back) --
         "sender_name": sender_name,
         "sender_country_code": sender_country_code,

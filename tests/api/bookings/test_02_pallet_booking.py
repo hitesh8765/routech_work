@@ -36,12 +36,20 @@ from data.booking_payloads import (
 )
 from data.diversity_tracker import next_saudi_side, next_fresh_location, next_delivery_partner
 from utils.html_parsing import saudi_locations, non_saudi_locations
-from reporting.excel_report import booking_type_label, route_label, delivery_partner_label, is_success_status
+from reporting.excel_report import (
+    booking_type_label,
+    route_label,
+    delivery_partner_label,
+    is_success_status,
+    SUCCESS_STATUSES,
+    FAILURE_STATUSES,
+)
 from tests.api.bookings.booking_test_helpers import (
     dump_debug,
     first_hs_code,
     raise_if_error_status,
     extract_booking_id,
+    wait_for_terminal_status,
 )
 
 
@@ -142,7 +150,7 @@ def test_create_pallet_booking(api_client, booking_report):
 
     # 7. log to the Excel report (location/partner/side usage already
     #    recorded atomically by the next_* tracker calls above)
-    status = api_client.booking_status_from_details(booking_id)
+    status = wait_for_terminal_status(api_client, booking_id, SUCCESS_STATUSES, FAILURE_STATUSES)
     booking_report.add_row(
         booking_type=booking_type_label(
             booking_type="pallet",

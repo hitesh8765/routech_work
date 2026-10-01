@@ -9,8 +9,14 @@ Excel test-run report, matching the format from the user's sample:
 
 ...rendered as proper Excel COLUMNS (one row per booking) rather than the
 block-per-booking plain-text layout, since that's far more usable inside
-Excel (sortable/filterable). Columns: Booking Type, Booking Number, Route,
-Delivery Partner, Status, Created At.
+Excel (sortable/filterable). Columns: Run ID, Booking Type, Booking
+Number, Route, Delivery Partner, Status, Created At.
+
+Report persistence (2026-09-22, user's final word -- supersedes an
+earlier "start fresh every run" instruction from the same day): every
+`pytest` session APPENDS to the existing report rather than overwriting
+it, with a "Run ID" column so individual runs can be told apart within
+the one growing file.
 
 If the block layout is actually preferred, this is the one place to
 change -- see BookingReport.save().
@@ -19,12 +25,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
 REPORT_PATH = Path(__file__).resolve().parent.parent / "reports" / "booking_report.xlsx"
 
-COLUMNS = ["Booking Type", "Booking Number", "Route", "Delivery Partner", "Status", "Created At"]
-COLUMN_WIDTHS = [22, 16, 20, 22, 18, 20]
+COLUMNS = ["Run ID", "Booking Type", "Booking Number", "Route", "Delivery Partner", "Status", "Created At"]
+COLUMN_WIDTHS = [18, 22, 16, 20, 22, 18, 20]
 
 # Display-name overrides confirmed from the user's sample report -- the
 # app's own reporting abbreviates "Saudi Arabia" to "Saudi" in the route
@@ -87,18 +93,32 @@ def route_label(pickup_country: str, dropoff_country: str) -> str:
     return f"{country_label(pickup_country)}-{country_label(dropoff_country)}"
 
 
+def generate_run_id() -> str:
+    return datetime.now().strftime("Run_%Y%m%d_%H%M%S")
+
+
 class BookingReport:
     """
-    Accumulates one row per created booking, for the CURRENT test session
-    only. Per the user's explicit instruction (2026-09-22): every full
-    `pytest` run starts a FRESH report -- it does NOT load/append to a
-    prior run's file. (Contrast with data/diversity_tracker.py's rotation
-    state, which DOES persist across runs -- those are separate concerns.)
+    Accumulates one row per created booking. APPENDS to the existing
+    report file across separate `pytest` runs (loads any prior rows
+    first), tagging every row from this run with a shared `run_id` so
+    different runs can be told apart within the one growing file.
+
+    (Contrast with data/diversity_tracker.py's rotation state, which also
+    persists across runs but is a separate concern -- don't conflate the
+    two files.)
     """
 
-    def __init__(self, path: Path = REPORT_PATH):
+    def __init__(self, path: Path = REPORT_PATH, run_id: Optional[str] = None):
         self.path = path
+        self.run_id = run_id or generate_run_id()
         self._rows: list = []
+        if self.path.exists():
+            wb = load_workbook(self.path)
+            ws = wb.active
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                if row and row[0] is not None:
+                    self._rows.append(list(row))
 
     def add_row(
         self,
@@ -110,6 +130,7 @@ class BookingReport:
     ):
         self._rows.append(
             [
+                self.run_id,
                 booking_type,
                 booking_number,
                 route,
@@ -130,4 +151,4 @@ class BookingReport:
             ws.column_dimensions[chr(64 + i)].width = width
         self.path.parent.mkdir(exist_ok=True)
         wb.save(self.path)
-        print(f"\n[report] Booking report saved -> {self.path} ({len(self._rows)} rows)\n")
+        print(f"\n[report] Booking report saved -> {self.path} ({len(self._rows)} rows, this run: {self.run_id})\n")
