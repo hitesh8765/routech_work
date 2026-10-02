@@ -7,11 +7,6 @@ must differ from each other, not just "differ within their own type".
 - Every booking must use a genuinely different pickup/dropoff LOCATION
   than recent bookings (not just a different country) -- prefer
   well-known/popular places where the account has such saved locations.
-  (Limitation: we can't algorithmically judge "popularity" of a saved
-  location -- this picks randomly among not-recently-used ones. See
-  handoff.md if the user wants genuinely new, popular-city locations
-  added via the /bookings/load_map geocoding flow instead of only
-  choosing among the account's existing saved locations.)
 - A non-Saudi location may only repeat after ~15-20 OTHER distinct
   non-Saudi locations have been used since (cooldown here: 17).
 - A Saudi location may only repeat after ~6-8 OTHER distinct Saudi
@@ -30,8 +25,8 @@ must differ from each other, not just "differ within their own type".
 
 All state persists to reports/diversity_state.json so it survives across
 separate `pytest` runs/sessions. This is DIFFERENT from
-reporting/excel_report.py's BookingReport, which the user confirmed
-starts FRESH every run -- don't conflate the two.
+reporting/excel_report.py's BookingReport state, which is a separate
+concern -- don't conflate the two.
 
 Each "next_*" function is atomic: it both picks AND records the choice in
 one call, so tests don't need a separate "remember to record" step (safer
@@ -46,24 +41,43 @@ STATE_PATH = Path(__file__).resolve().parent.parent / "reports" / "diversity_sta
 SAUDI_LOCATION_COOLDOWN = 7    # within the given 6-8 range
 INTL_LOCATION_COOLDOWN = 17    # within the given 15-20 range
 
-# Full delivery-partner rotation. DHL (plain + every dhl_* variant)
-# deliberately excluded per the user's explicit instruction -- keep the
-# labels/mapping in reporting/excel_report.py for when it's needed, just
-# don't pick from it here until told otherwise.
+# NARROWED (2026-09-23, stability fix): a live run failed with
+# "booking_detail_0_delivery_partner..." (message truncated in terminal,
+# not yet seen in full) while the rotation had progressed into the
+# fedex_*/darb variants below. These were NEVER individually confirmed as
+# valid, selectable `delivery_partners` values via live recon -- only
+# "ups" and "aramex" were actually seen chosen in a real successful UI
+# booking. Likely root cause (unconfirmed): get_delivery_and_rate's real
+# response shape is STILL unconfirmed (long-standing open item -- see
+# handoff.md), so we've always been submitting blank delivery_rate_*
+# fields regardless of chosen partner; the server may reject a
+# `delivery_partners` selection whose corresponding rate wasn't actually
+# quoted/available for that route. This would also explain the general
+# "sometimes passes, sometimes fails" instability independent of the
+# phone-number issues. Narrowed to the two CONFIRMED-working values as an
+# immediate stability fix. Once get_delivery_and_rate's response shape is
+# finally confirmed (add a dump_debug() call on it and inspect), restore
+# the full list below and pick only from partners the response actually
+# quotes for that booking, rather than blind rotation.
 DELIVERY_PARTNER_ROTATION = [
-    "ups", "aramex", "fedex", "fedex_priority", "fedex_express",
-    "fedex_regional", "fedex_connect_plus", "fedex_priority_freight",
-    "fedex_regional_economy_freight", "fedex_economy_freight", "darb",
+    "ups", "aramex",
 ]
+# Full list, kept for reference / restoring once availability can be
+# properly checked -- DO NOT re-enable without confirming each value is
+# actually selectable (not just a delivery_rate_* field name, which may
+# not be 1:1 with valid delivery_partners selections):
+#   "fedex", "fedex_priority", "fedex_express", "fedex_regional",
+#   "fedex_connect_plus", "fedex_priority_freight",
+#   "fedex_regional_economy_freight", "fedex_economy_freight", "darb"
+# DHL (plain + every dhl_* variant) stays excluded regardless, per the
+# user's explicit instruction -- keep the labels/mapping in
+# reporting/excel_report.py for when it's needed, just don't pick from it
+# here until told otherwise.
 
 # Backfilled from real bookings already created before this stricter
-# per-booking tracker existed:
-#   Parcel run 1: saudi_side=pickup,  partner=ups
-#   Parcel run 2: saudi_side=dropoff, partner=ups
-#   Pallet run:   saudi_side=pickup,  partner=aramex
-# -> last Saudi side used = "pickup" (so the next booking should flip to
-#    "dropoff"); partners already used = ups (idx 0), aramex (idx 1), so
-#    the next fresh pick should start from idx 2 (fedex).
+# per-booking tracker existed. Last Saudi side used = "pickup" (so the
+# next booking should flip to "dropoff"); partners already used = ups,
+# aramex, so the next fresh pick starts from idx 2 (fedex).
 _DEFAULT_STATE = {
     "used_saudi_location_ids": [],
     "used_intl_location_ids": [],
@@ -98,11 +112,12 @@ def next_saudi_side() -> str:
 
 def set_last_saudi_side(side: str):
     """
-    For tests whose direction is fixed externally (e.g. Parcel's own
-    pytest.mark.parametrize covers both directions every run regardless of
-    the global rotation) -- updates the persisted 'last side used' to
-    match reality, so the NEXT booking's next_saudi_side() call still
-    alternates correctly from true history.
+    For tests whose direction is fixed externally -- updates the
+    persisted 'last side used' to match reality, so the NEXT booking's
+    next_saudi_side() call still alternates correctly from true history.
+    Currently unused by any test (Parcel's parametrize was removed
+    2026-09-22), kept in case a dedicated both-directions regression test
+    is wanted later.
     """
     state = _load()
     state["last_saudi_side"] = side

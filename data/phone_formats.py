@@ -4,20 +4,30 @@ significant number length (digits dialed after the country code, no
 leading 0), keyed by ISO alpha-2 country code (matches the `country_code`
 field already present on our location dicts -- see utils/html_parsing.py).
 
-Rule (given by the user, 2026-09-22): the receiver's mobile number length
-must match their actual country's real format, or the server rejects it
-("Invalid mobile number. Mobile number must be N digits."). Examples given
-directly: India (+91) 10 digits, United States (+1) 10 digits, Saudi
-Arabia (+966) 9 digits, Spain (+34) 9 digits, Singapore (+65) 8 digits,
-Hong Kong (+852) 8 digits.
+Rule (given by the user, 2026-09-22): the receiver's (and, per a later
+clarification, the sender's) mobile number length must match their actual
+country's real format, or the server rejects it ("Invalid mobile number.
+Mobile number must be N digits."). Examples given directly: India (+91)
+10 digits, United States (+1) 10 digits, Saudi Arabia (+966) 9 digits,
+Spain (+34) 9 digits, Singapore (+65) 8 digits, Hong Kong (+852) 8 digits.
+
+NOTE (2026-09-22, live run): a non-Saudi booking's receiver number was
+rejected with "must be 10 digits" even though our table said something
+else for that country -- evidence the live server's ACTUAL validation
+might be simpler than true per-country formats (e.g. "9 digits for Saudi,
+10 digits for everything else"), not a full per-country lookup. This
+table is kept as the best-effort per-country source of truth per the
+user's instruction, but see handoff.md "Open Items" for the simpler
+9-for-Saudi/10-for-everyone-else theory, which may need to take priority
+if more countries keep coming back rejected.
 
 This table is best-effort/not exhaustive -- extended with standard known
 mobile-number lengths for countries likely to appear in the account's
 saved locations (seen so far: France, Australia, Armenia, Ethiopia,
-Bulgaria, Mauritius, India, USA, Saudi Arabia) plus other common
-countries. If a booking hits a NEW country not covered here and the
-server rejects the phone number length, add it here rather than guessing
-in the test -- the error message will say the required digit count.
+Bulgaria, Mauritius, India, USA, Saudi Arabia, United States) plus other
+common countries. If a booking hits a NEW country not covered here and
+the server rejects the phone number length, add it here rather than
+guessing in the test -- the error message will say the required count.
 """
 from typing import NamedTuple
 

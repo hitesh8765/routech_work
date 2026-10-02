@@ -585,3 +585,67 @@ If the user says "now build automation" again for a **new** booking type
   `data/booking_payloads.py` with a new builder + `api/client.py` if any
   new endpoints appear, following the exact same structure as the Parcel
   implementation.
+
+## Addendum (2026-09-22, continued session) -- append this section to handoff.md
+
+**Sender phone now also country-matched (user clarification):** extending
+the receiver-phone fix, the user clarified the SAME rule applies to the
+sender too: "whichever country u take in pickup and dropoff adjust the
+phone number accordingly ... set according to the country we are taking
+in pickup and dropoff location." Implemented: `sender_country_code` /
+`sender_mobile_number` are now generated via `random_mobile_for_country()`
+matched to the **pickup** location's country (receiver stays matched to
+**dropoff**, as before). This also matches what real live recon already
+showed (Pallet's Australia-pickup booking had `sender_country_code: "+61"`
+in the actual captured UI request, not a fixed Saudi default) --
+`build_booking_detail()`'s `sender_country_code`/`sender_mobile_number`
+parameters were removed (no longer meaningful as overridable defaults
+since they're always computed now); `sender_name` stays the only
+remaining override param (fixed account-holder name).
+
+**Open question, NOT YET RESOLVED — per-country phone table vs. simpler
+rule:** a live run after the above fixes showed the RECEIVER (`stakeholders`)
+rejected with "must be 10 digits" for some non-Saudi dropoff country. This
+contradicts our per-country table's entry for whichever country was
+actually used. Two live data points so far:
+  - Dropoff = Saudi Arabia → server said "must be 9 digits" (matches our SA entry)
+  - Dropoff = (some other country, not yet confirmed which) → server said "must be 10 digits"
+This is consistent with a MUCH simpler theory: **the server may just
+require 9 digits for Saudi numbers and 10 digits for every other country,
+full stop** -- not genuine fine-grained per-country formats like the
+Spain=9/Singapore=8/HK=8 examples the user gave (those may be accurate
+real-world telecom standards but not what THIS demo server's validation
+actually checks). **Next step: get the specific failing country from
+`.auth/debug_create_booking_response.json` on the next run, and ask the
+user whether to collapse `data/phone_formats.py` down to just
+"9 for SA, 10 for everyone else"** rather than maintaining the full
+per-country table, if more non-Saudi countries keep coming back expecting
+10 regardless of what our table says for them specifically. Don't
+unilaterally simplify the table without more evidence first -- only one
+data point so far beyond Saudi.
+
+**New bug found — Pallet booking rejected with "There should be saudi
+arabia country either in pickup or dropoff address" (neither side was
+Saudi per the server), despite our selection logic (`next_fresh_location`,
+`arrange_pickup_dropoff`) appearing correct on close code review — no
+obvious bug found by inspection alone. Added extensive defensive
+assertions throughout BOTH test files (`assert_exactly_one_saudi_side()`
+in `booking_test_helpers.py`, called right after `arrange_pickup_dropoff`
+AND again on the final built `booking_detail` dict, plus sanity checks on
+`next_saudi_side()`'s return value, `next_fresh_location()`'s
+Saudi/non-Saudi correctness, delivery partner never being DHL, and
+non-empty phone/HS-code fields) per the user's explicit instruction to
+"always use assertions wherever possible so we can identify the issue
+fast." **NOT YET RE-CONFIRMED** — next run will show definitively whether
+the bug is in our own code (one of these new assertions will fire,
+pinpointing exactly where) or something else entirely (all assertions
+pass here, but the server still rejects it — in which case share
+`.auth/debug_create_pallet_booking_response.json` for the real payload).
+
+**Session note:** the sandbox environment hosting this framework's working
+copy was reset between conversation turns (lost all files). All files were
+reconstructed from conversation history/memory and re-verified
+(compile-checked + smoke-tested) before being resent. No functional
+regressions expected, but if anything seems to have reverted to an older
+behavior unexpectedly, flag it — that would be a reconstruction slip to
+diff against the files the user already has saved locally.

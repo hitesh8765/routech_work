@@ -1,28 +1,27 @@
 """
 E2E API test for Pallet booking creation (B2B account).
 
-Confirmed via live recon (2026-09-21, user drove the UI manually while
-this framework watched DevTools): Pallet's /bookings/add payload is
+Confirmed via live recon (2026-09-21): Pallet's /bookings/add payload is
 IDENTICAL to Parcel's except `booking_type: "pallet"` (and the absence of
-`pallet_container_id`, which turned out not to be pallet-specific despite
-the name -- see handoff.md). Same booking_form / get_hs_codes /
-get_delivery_and_rate / make_ppd_payment / get_booking_details endpoints,
-same field names throughout.
+`pallet_container_id`). Same endpoints throughout.
 
-Diversity rules (given by the user, refined 2026-09-22) -- these apply
-PER BOOKING, not per booking type:
-    - Saudi side (pickup/dropoff) must strictly ALTERNATE from whatever
-      the previous booking (of ANY type) used -- data/diversity_tracker.py
-      next_saudi_side().
-    - Pickup/dropoff locations must respect reuse cooldowns (~7 other
-      Saudi locations / ~17 other non-Saudi locations before a repeat) --
-      next_fresh_location().
-    - Delivery partner round-robins through every partner (DHL excluded)
-      before any repeat -- next_delivery_partner().
+Diversity rules (given by the user, refined 2026-09-22) -- apply PER
+BOOKING, not per booking type: Saudi side strictly alternates globally
+(next_saudi_side()), locations respect reuse cooldowns
+(next_fresh_location()), delivery partner round-robins with DHL excluded
+(next_delivery_partner()).
 
-Flow is otherwise identical to test_parcel_booking.py -- see that file's
-docstring for the step-by-step breakdown, and handoff.md for the full
-confirmed API contract / open items.
+Per the user's explicit instruction (2026-09-22): assertions are used
+liberally throughout, including BEFORE hitting the API where possible --
+added specifically after a real run where this booking was rejected
+server-side with "There should be saudi arabia country either in pickup
+or dropoff address" despite the selection logic appearing correct on
+review. These assertions will immediately show whether a future
+occurrence is a bug in our own selection/payload-building code (assertion
+fires here) or something else (assertion passes here, server still
+rejects -- needs the raw request payload to diagnose further).
+
+See handoff.md for the full confirmed API contract and any open items.
 """
 import random
 
@@ -50,6 +49,7 @@ from tests.api.bookings.booking_test_helpers import (
     raise_if_error_status,
     extract_booking_id,
     wait_for_terminal_status,
+    assert_exactly_one_saudi_side,
 )
 
 
@@ -73,17 +73,33 @@ def test_create_pallet_booking(api_client, booking_report):
     assert intl_locations, "No saved non-Saudi locations available on this account."
 
     saudi_side = next_saudi_side()
+    assert saudi_side in ("pickup", "dropoff"), f"next_saudi_side() returned unexpected value: {saudi_side!r}"
+
     saudi_location = next_fresh_location(sa_locations, is_saudi=True)
+    assert (saudi_location.get("country_code") or "").upper() == "SA", (
+        f"next_fresh_location(is_saudi=True) returned a non-Saudi location: {saudi_location!r}"
+    )
+
     intl_location = next_fresh_location(intl_locations, is_saudi=False)
+    assert (intl_location.get("country_code") or "").upper() != "SA", (
+        f"next_fresh_location(is_saudi=False) returned a Saudi location: {intl_location!r}"
+    )
+
     pickup, dropoff = arrange_pickup_dropoff(saudi_location, intl_location, saudi_side=saudi_side)
+    assert_exactly_one_saudi_side(pickup, dropoff, context="after arrange_pickup_dropoff (pallet)")
 
     delivery_partner = next_delivery_partner()
+    assert delivery_partner and "dhl" not in delivery_partner.lower(), (
+        f"next_delivery_partner() returned {delivery_partner!r} -- DHL must never be selected."
+    )
+
     receiver_name = random.choice(RECEIVER_NAME_POOL)
 
     # 2. HS code lookup (uses same string as item name per the rule)
     item_name_for_lookup = random.choice(ITEM_NAME_POOL)
     hs_code_response = api_client.get_hs_codes(item_name_for_lookup)
     hs_code = first_hs_code(hs_code_response)
+    assert hs_code, "first_hs_code() returned an empty value."
 
     # 3. delivery rate quote
     rate_payload = {
@@ -114,6 +130,7 @@ def test_create_pallet_booking(api_client, booking_report):
         "is_palletized": "false",
     }
     delivery_rates = api_client.get_delivery_and_rate(rate_payload)
+    dump_debug("get_delivery_and_rate_pallet_response", delivery_rates)
 
     # 4. build + create booking
     booking_detail = build_pallet_booking_detail(
@@ -124,6 +141,18 @@ def test_create_pallet_booking(api_client, booking_report):
         delivery_rates=delivery_rates,
         delivery_partner=delivery_partner,
     )
+    # Sanity-check the FINAL built dict too, not just the inputs -- catches
+    # any bug introduced inside build_booking_detail's own field mapping.
+    assert_exactly_one_saudi_side(
+        {"country_code": booking_detail["pickup_country_code"]},
+        {"country_code": booking_detail["dropoff_country_code"]},
+        context="booking_detail dict itself (pallet)",
+    )
+    assert booking_detail["stakeholders"], "Receiver mobile number (stakeholders) is empty."
+    assert booking_detail["sender_mobile_number"], "Sender mobile number is empty."
+    assert booking_detail["country_code"].startswith("+"), f"Receiver dial code looks wrong: {booking_detail['country_code']!r}"
+    assert booking_detail["sender_country_code"].startswith("+"), f"Sender dial code looks wrong: {booking_detail['sender_country_code']!r}"
+
     create_response = api_client.create_booking(booking_detail)
     dump_debug("create_pallet_booking_response", create_response)
     raise_if_error_status(create_response, context="create_booking (pallet)")

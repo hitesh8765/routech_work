@@ -4,8 +4,8 @@ during the walkthrough:
 
   - For every booking, exactly one of {pickup, dropoff} must be a Saudi
     Arabia location; the other must be non-Saudi. Which side is Saudi
-    should vary across bookings/tests (not always pickup, not always
-    dropoff).
+    strictly alternates booking to booking, globally, across all booking
+    types -- see data/diversity_tracker.py.
   - Insurance: always "No".
   - Shipment Invoice: always "Create Invoice" (never "Upload Invoice").
   - Item Name: random from ITEM_NAME_POOL.
@@ -18,14 +18,22 @@ during the walkthrough:
   - Length > Width > Height, chosen as one whole combo from
     DIMENSION_COMBO_POOL (never assembled from independently-random parts,
     to preserve the length > width > height ordering rule).
-  - Receiver Mobile Number: 10 digits, starting with "96" (i.e. a Saudi
-    mobile shape, regardless of which side is physically Saudi).
+  - Receiver Mobile Number AND Sender Mobile Number: digit count must
+    match the ACTUAL country they belong to (receiver -> dropoff country,
+    sender -> pickup country), confirmed by the user (2026-09-22) and
+    extended to cover the sender too in a later clarification -- see
+    data/phone_formats.py. Was previously a fixed/flexible-length scheme;
+    superseded.
 
 Field-name mapping confirmed by live capture of POST /bookings/add:
     stakeholder_name        -> Receiver Name
-    country_code            -> Receiver's country code (e.g. "+966")
-    stakeholders             -> Receiver Mobile Number
-    sender_name / sender_country_code / sender_mobile_number -> Sender (auto-filled, just assert non-empty in tests)
+    country_code            -> Receiver's phone country code (now dynamic, matches dropoff country)
+    stakeholders             -> Receiver Mobile Number (now dynamic length, matches dropoff country)
+    sender_name / sender_country_code / sender_mobile_number -> Sender
+        (sender_name stays fixed -- real account holder name; sender
+        phone/country code now dynamic, matches PICKUP country -- real
+        live recon showed the actual UI does this too, e.g. "+61" for an
+        Australia pickup, not a fixed Saudi default)
 """
 import random
 from typing import Literal
@@ -80,12 +88,10 @@ def random_dimensions() -> tuple:
 
 def random_mobile_for_country(iso_country_code: str) -> tuple:
     """
-    SUPERSEDES the old random_receiver_mobile() (2026-09-22, user
-    correction): the receiver's mobile number length must match their
-    actual country's real format (e.g. India/USA 10 digits, Saudi
-    Arabia/Spain 9 digits, Singapore/Hong Kong 8 digits), not a fixed
-    9-or-10-digit "96..." shape -- see data/phone_formats.py for the full
-    table. Returns (dial_code, local_number), e.g. ("+966", "512345678").
+    Returns (dial_code, local_number) matching the given country's real
+    phone format (digit count) -- see data/phone_formats.py. Used for
+    BOTH the receiver (matched to dropoff country) and sender (matched to
+    pickup country) per the user's explicit instructions (2026-09-22).
     Avoids a leading 0 so the number looks like a plausible real mobile.
     """
     fmt = get_phone_format(iso_country_code)
@@ -108,9 +114,7 @@ def arrange_pickup_dropoff(saudi_location: dict, intl_location: dict, saudi_side
 
     NOTE: location SELECTION itself (which Saudi/non-Saudi location to use)
     is handled by data/diversity_tracker.py's next_fresh_location() --
-    this function only arranges two already-picked locations. It used to
-    also pick randomly itself (see git history / handoff.md), but that was
-    superseded by the diversity tracker's cooldown-aware picking.
+    this function only arranges two already-picked locations.
     """
     if saudi_side == "pickup":
         return saudi_location, intl_location  # pickup, dropoff
@@ -126,8 +130,6 @@ def build_booking_detail(
     delivery_rates: dict,
     delivery_partner: str = "ups",
     sender_name: str = "Neeraj Sharma",
-    sender_country_code: str = "+966",
-    sender_mobile_number: str = "800582001",  # confirmed real value shown on the site (2026-09-22) -- was "8005820010" (10 digits) until the server started requiring 9-digit numbers; user confirmed the site's own displayed value is this with the trailing 0 dropped
 ) -> dict:
     """
     Builds the exact `booking_detail[0]` dict shape captured live for both
@@ -145,21 +147,21 @@ def build_booking_detail(
     are merged straight into the payload (mirrors what the UI does: it
     echoes back every partner's quote, not just the chosen one).
 
-    NOTE: real capture also showed `sender_country_code` varying by pickup
-    location in the live UI (e.g. "+61" for an Australia pickup) rather
-    than a fixed "+966" -- but our automated tests already pass reliably
-    with a hardcoded value across multiple country pairs, so this default
-    is left as-is rather than adding a country->dial-code mapping for
-    something that isn't blocking anything. See handoff.md.
+    Receiver AND sender phone number/country-code are both generated to
+    match their respective location's real country format (receiver <-
+    dropoff, sender <- pickup) -- see random_mobile_for_country() and
+    data/phone_formats.py. sender_name stays fixed (the real account
+    holder's name, confirmed via live capture).
     """
     item = random_item()
     actual_weight = random_actual_weight()
     length, width, height = random_dimensions()
 
-    # Receiver is physically at the dropoff location, so their phone
-    # format (dial code + digit count) should match the DROPOFF country,
-    # not a fixed Saudi shape -- see data/phone_formats.py.
+    # Receiver is physically at the dropoff location; sender at pickup.
+    # Phone format (dial code + digit count) should match each side's own
+    # country -- see data/phone_formats.py.
     receiver_dial_code, receiver_mobile = random_mobile_for_country(dropoff_location.get("country_code", ""))
+    sender_dial_code, sender_mobile = random_mobile_for_country(pickup_location.get("country_code", ""))
 
     detail = {
         # -- pickup --
@@ -196,10 +198,10 @@ def build_booking_detail(
         "stakeholder_name": receiver_name,
         "country_code": receiver_dial_code,
         "stakeholders": receiver_mobile,
-        # -- sender (auto-filled by account; just echoed back) --
+        # -- sender --
         "sender_name": sender_name,
-        "sender_country_code": sender_country_code,
-        "sender_mobile_number": sender_mobile_number,
+        "sender_country_code": sender_dial_code,
+        "sender_mobile_number": sender_mobile,
         "imported_order_id": "",
         # -- options (business rules) --
         "insurance": "0",       # always "No"

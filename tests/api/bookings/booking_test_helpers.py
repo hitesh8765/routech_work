@@ -1,6 +1,6 @@
 """
-Shared helpers for the per-booking-type E2E API tests (test_parcel_booking.py,
-test_pallet_booking.py, ...). Extracted here once Pallet needed the same
+Shared helpers for the per-booking-type E2E API tests (test_01_parcel_booking.py,
+test_02_pallet_booking.py, ...). Extracted here once Pallet needed the same
 logic Parcel already had, rather than duplicating per file.
 """
 import json
@@ -63,8 +63,7 @@ def raise_if_error_status(response: dict, context: str):
 
     IMPORTANT: a bare `status == "error"` is NOT sufficient on its own --
     a real successful create_booking response was observed that ALSO had
-    top-level 'status' unrelated to this check (this endpoint seems to
-    reuse 'status' for other domain meaning too). Only fire when the
+    top-level 'status' unrelated to this check. Only fire when the
     'message' and/or 'req_data' keys -- unique to the confirmed error
     shape -- are also present.
     """
@@ -108,19 +107,8 @@ def wait_for_terminal_status(
     """
     Polls booking_status_from_details() until a known terminal status
     (from either success_statuses or failure_statuses) is reached, or
-    timeout elapses.
-
-    Added 2026-09-22: a booking checked IMMEDIATELY after payment
-    completion once showed status 'Requested' -- a value not in either the
-    confirmed success set ("Sent to Carrier"/"Shipment Submitted") or
-    failure set ("In Transit"/"Pickup Fail"/"Fail"). Working theory: the
-    server takes a moment to actually process the booking into a terminal
-    status after payment, and we were checking too fast. This polls a few
-    times rather than checking once. NOT YET FULLY CONFIRMED -- if
-    'Requested' persists as the final status after the full timeout, that
-    suggests it ISN'T just a timing artifact and needs separate
-    investigation (ask the user to check that specific booking on the live
-    site) rather than assuming this fix resolves it.
+    timeout elapses. Handles the apparent async delay between payment
+    completing and the booking's status actually updating server-side.
     """
     deadline = time.time() + timeout
     last_status = None
@@ -130,3 +118,25 @@ def wait_for_terminal_status(
             return last_status
         time.sleep(interval)
     return last_status
+
+
+def assert_exactly_one_saudi_side(pickup: dict, dropoff: dict, context: str = ""):
+    """
+    Defensive assertion (added 2026-09-22 after a real Pallet booking was
+    rejected server-side with "There should be saudi arabia country either
+    in pickup or dropoff address", despite our selection logic appearing
+    correct on review): fails FAST, before even calling the API, if our
+    own pickup/dropoff dicts don't have exactly one Saudi side. This
+    narrows down whether a future occurrence is a bug in OUR location
+    selection (this assertion fires) or something else entirely -- e.g. a
+    payload-construction issue, or a genuine server-side quirk (this
+    assertion passes here, but the server still rejects it -- in which
+    case the full request payload from .auth/debug_*.json is needed).
+    """
+    pickup_is_sa = (pickup.get("country_code") or "").upper() == "SA"
+    dropoff_is_sa = (dropoff.get("country_code") or "").upper() == "SA"
+    assert pickup_is_sa != dropoff_is_sa, (  # exactly one, not both/neither
+        f"{context}: expected exactly ONE of pickup/dropoff to be Saudi Arabia, got "
+        f"pickup country_code={pickup.get('country_code')!r} (id={pickup.get('id')!r}), "
+        f"dropoff country_code={dropoff.get('country_code')!r} (id={dropoff.get('id')!r})"
+    )

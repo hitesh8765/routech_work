@@ -12,17 +12,13 @@ Flow (all via API, session captured once via UI login + manual captcha):
     6. POST /bookings/add -> create the booking
     7. POST /bookings/make_ppd_payment -> pay via wallet
     8. GET /bookings/get_booking_details/:id -> verify it landed correctly
-    9. Log to reports/booking_report.xlsx (fresh every test session)
+    9. Log to reports/booking_report.xlsx (appends across runs, tagged
+       with a Run ID)
 
-CHANGED (2026-09-22, per user correction): this used to
-pytest.mark.parametrize over BOTH saudi_side values, producing 2 Parcel
-bookings every run regardless of what ran before it -- which broke the
-GLOBAL strict alternation rule (e.g. Pallet used Saudi-as-pickup, then
-this test's first parametrized case ALSO used Saudi-as-pickup, back to
-back, instead of flipping). Fixed: exactly ONE booking per run now, side
-decided by next_saudi_side() just like every other booking type, so the
-whole suite's alternation sequence stays correct end to end regardless of
-which booking types run or in what order.
+Per the user's explicit instruction (2026-09-22): assertions are used
+liberally throughout, including BEFORE hitting the API where possible, so
+any failure's root cause is immediately obvious from the assertion message
+rather than needing a round-trip through a server error.
 
 See handoff.md for the full confirmed API contract and any open items.
 """
@@ -52,6 +48,7 @@ from tests.api.bookings.booking_test_helpers import (
     raise_if_error_status,
     extract_booking_id,
     wait_for_terminal_status,
+    assert_exactly_one_saudi_side,
 )
 
 
@@ -70,11 +67,26 @@ def test_create_parcel_booking(api_client, booking_report):
     assert intl_locations, "No saved non-Saudi locations available on this account."
 
     saudi_side = next_saudi_side()
+    assert saudi_side in ("pickup", "dropoff"), f"next_saudi_side() returned unexpected value: {saudi_side!r}"
+
     saudi_location = next_fresh_location(sa_locations, is_saudi=True)
+    assert (saudi_location.get("country_code") or "").upper() == "SA", (
+        f"next_fresh_location(is_saudi=True) returned a non-Saudi location: {saudi_location!r}"
+    )
+
     intl_location = next_fresh_location(intl_locations, is_saudi=False)
+    assert (intl_location.get("country_code") or "").upper() != "SA", (
+        f"next_fresh_location(is_saudi=False) returned a Saudi location: {intl_location!r}"
+    )
+
     pickup, dropoff = arrange_pickup_dropoff(saudi_location, intl_location, saudi_side=saudi_side)
+    assert_exactly_one_saudi_side(pickup, dropoff, context="after arrange_pickup_dropoff (parcel)")
 
     delivery_partner = next_delivery_partner()
+    assert delivery_partner and "dhl" not in delivery_partner.lower(), (
+        f"next_delivery_partner() returned {delivery_partner!r} -- DHL must never be selected."
+    )
+
     receiver_name = random.choice(RECEIVER_NAME_POOL)
 
     # 2. HS code lookup (uses same string as item name per the rule -- but
@@ -83,6 +95,7 @@ def test_create_parcel_booking(api_client, booking_report):
     item_name_for_lookup = random.choice(ITEM_NAME_POOL)
     hs_code_response = api_client.get_hs_codes(item_name_for_lookup)
     hs_code = first_hs_code(hs_code_response)
+    assert hs_code, "first_hs_code() returned an empty value."
 
     # 3. delivery rate quote
     rate_payload = {
@@ -113,6 +126,7 @@ def test_create_parcel_booking(api_client, booking_report):
         "is_palletized": "false",
     }
     delivery_rates = api_client.get_delivery_and_rate(rate_payload)
+    dump_debug("get_delivery_and_rate_response", delivery_rates)
 
     # 4. build + create booking
     booking_detail = build_parcel_booking_detail(
@@ -123,6 +137,18 @@ def test_create_parcel_booking(api_client, booking_report):
         delivery_rates=delivery_rates,
         delivery_partner=delivery_partner,
     )
+    # Sanity-check the FINAL built dict too, not just the inputs -- catches
+    # any bug introduced inside build_booking_detail's own field mapping.
+    assert_exactly_one_saudi_side(
+        {"country_code": booking_detail["pickup_country_code"]},
+        {"country_code": booking_detail["dropoff_country_code"]},
+        context="booking_detail dict itself (parcel)",
+    )
+    assert booking_detail["stakeholders"], "Receiver mobile number (stakeholders) is empty."
+    assert booking_detail["sender_mobile_number"], "Sender mobile number is empty."
+    assert booking_detail["country_code"].startswith("+"), f"Receiver dial code looks wrong: {booking_detail['country_code']!r}"
+    assert booking_detail["sender_country_code"].startswith("+"), f"Sender dial code looks wrong: {booking_detail['sender_country_code']!r}"
+
     create_response = api_client.create_booking(booking_detail)
     dump_debug("create_booking_response", create_response)
     raise_if_error_status(create_response, context="create_booking")
@@ -146,7 +172,6 @@ def test_create_parcel_booking(api_client, booking_report):
 
     details_html = api_client.get_booking_details_html(booking_id)
     assert "Parcel" in details_html
-    assert receiver_name.split()[0] in details_html or True  # receiver name isn't always echoed verbatim; booking_number is the strong signal
 
     # 7. log to the Excel report (location/partner/side usage already
     #    recorded atomically by the next_* tracker calls above)
