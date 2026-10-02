@@ -90,7 +90,7 @@ PHONE_FORMAT_BY_ISO: dict[str, PhoneFormat] = {
 # placeholder (9 digits is the most common mobile length worldwide). If
 # this fires and the server rejects it, add the real entry above instead
 # of relying on the fallback.
-DEFAULT_PHONE_FORMAT = PhoneFormat("+1", 9)
+DEFAULT_PHONE_FORMAT = PhoneFormat("+1", 10)
 
 
 def get_phone_format(iso_country_code: str) -> PhoneFormat:
