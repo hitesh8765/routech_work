@@ -58,6 +58,9 @@ RECEIVER_NAME_POOL = [
 
 # Each tuple is (length, width, height) with length > width > height, as
 # specified -- picked as a whole combo, never mixed-and-matched.
+# PARCEL-ONLY (small items). For Pallet, see PALLET_DIMENSION_COMBO_POOL
+# below -- pallets are much bigger/heavier, per the user's explicit rule
+# (2026-09-23).
 DIMENSION_COMBO_POOL = [
     (14, 13, 11),
     (15, 12, 11),
@@ -65,6 +68,19 @@ DIMENSION_COMBO_POOL = [
     (15, 11, 10),
     (13, 10, 8),
 ]
+ACTUAL_WEIGHT_RANGE = (8, 16)
+
+# PALLET-ONLY: actual weight always 75-83; length > width > height, picked
+# as a whole combo from a small fixed pool (reference combo given by the
+# user: 80/75/68), rather than independently randomizing each dimension.
+PALLET_DIMENSION_COMBO_POOL = [
+    (80, 75, 68),
+    (82, 74, 70),
+    (83, 76, 69),
+    (81, 73, 67),
+    (84, 77, 71),
+]
+PALLET_ACTUAL_WEIGHT_RANGE = (75, 83)
 
 DELIVERY_PARTNER_RATE_FIELDS = [
     "delivery_rate_ups", "delivery_rate_dhl", "delivery_rate_aramex",
@@ -78,11 +94,15 @@ DELIVERY_PARTNER_RATE_FIELDS = [
 ]
 
 
-def random_actual_weight() -> int:
-    return random.randint(8, 16)
+def random_actual_weight(booking_type: str = "parcel") -> int:
+    if booking_type == "pallet":
+        return random.randint(*PALLET_ACTUAL_WEIGHT_RANGE)
+    return random.randint(*ACTUAL_WEIGHT_RANGE)
 
 
-def random_dimensions() -> tuple:
+def random_dimensions(booking_type: str = "parcel") -> tuple:
+    if booking_type == "pallet":
+        return random.choice(PALLET_DIMENSION_COMBO_POOL)
     return random.choice(DIMENSION_COMBO_POOL)
 
 
@@ -154,8 +174,8 @@ def build_booking_detail(
     holder's name, confirmed via live capture).
     """
     item = random_item()
-    actual_weight = random_actual_weight()
-    length, width, height = random_dimensions()
+    actual_weight = random_actual_weight(booking_type)
+    length, width, height = random_dimensions(booking_type)
 
     # Receiver is physically at the dropoff location; sender at pickup.
     # Phone format (dial code + digit count) should match each side's own

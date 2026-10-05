@@ -153,6 +153,12 @@ def test_create_pallet_booking(api_client, booking_report):
     assert booking_detail["country_code"].startswith("+"), f"Receiver dial code looks wrong: {booking_detail['country_code']!r}"
     assert booking_detail["sender_country_code"].startswith("+"), f"Sender dial code looks wrong: {booking_detail['sender_country_code']!r}"
 
+    # Pallet-specific rule (2026-09-23): actual weight 75-83, length > width > height.
+    pkg = booking_detail["package_dimensions"][0]
+    actual_weight, length, width, height = int(pkg["actual_weight"]), int(pkg["length"]), int(pkg["width"]), int(pkg["height"])
+    assert 75 <= actual_weight <= 83, f"Pallet actual_weight out of range: {actual_weight} (expected 75-83)"
+    assert length > width > height, f"Pallet dimensions must satisfy length>width>height, got {(length, width, height)}"
+
     create_response = api_client.create_booking(booking_detail)
     dump_debug("create_pallet_booking_response", create_response)
     raise_if_error_status(create_response, context="create_booking (pallet)")
