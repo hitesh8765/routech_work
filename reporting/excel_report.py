@@ -150,5 +150,17 @@ class BookingReport:
         for i, width in enumerate(COLUMN_WIDTHS, start=1):
             ws.column_dimensions[chr(64 + i)].width = width
         self.path.parent.mkdir(exist_ok=True)
-        wb.save(self.path)
+        try:
+            wb.save(self.path)
+        except PermissionError as exc:
+            # Windows locks the file while it's open in Excel -- this is
+            # the #1 cause of a raw zipfile PermissionError traceback here.
+            # Surface a clear, actionable message instead of letting the
+            # cryptic zipfile internals be the last thing the user sees.
+            raise RuntimeError(
+                f"Could not save the report to {self.path} -- it's likely open in "
+                "Excel (or another program) on your machine. Close the file and "
+                "re-run. (The booking(s) themselves were still created successfully "
+                "-- only this report write failed.)"
+            ) from exc
         print(f"\n[report] Booking report saved -> {self.path} ({len(self._rows)} rows, this run: {self.run_id})\n")

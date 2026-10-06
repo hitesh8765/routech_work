@@ -586,115 +586,149 @@ If the user says "now build automation" again for a **new** booking type
   new endpoints appear, following the exact same structure as the Parcel
   implementation.
 
-## 12. Session addendum (2026-09-23) — Parcel + Pallet both confirmed passing
+## Addendum (2026-09-22, continued session) -- append this section to handoff.md
 
-**🎉 Milestone: both `test_01_parcel_booking.py` and
-`test_02_pallet_booking.py` pass reliably.** Several fixes landed to get
-here, documented below.
+**Sender phone now also country-matched (user clarification):** extending
+the receiver-phone fix, the user clarified the SAME rule applies to the
+sender too: "whichever country u take in pickup and dropoff adjust the
+phone number accordingly ... set according to the country we are taking
+in pickup and dropoff location." Implemented: `sender_country_code` /
+`sender_mobile_number` are now generated via `random_mobile_for_country()`
+matched to the **pickup** location's country (receiver stays matched to
+**dropoff**, as before). This also matches what real live recon already
+showed (Pallet's Australia-pickup booking had `sender_country_code: "+61"`
+in the actual captured UI request, not a fixed Saudi default) --
+`build_booking_detail()`'s `sender_country_code`/`sender_mobile_number`
+parameters were removed (no longer meaningful as overridable defaults
+since they're always computed now); `sender_name` stays the only
+remaining override param (fixed account-holder name).
 
-**IMPORTANT PROCESS LESSON — repo sync drift caused real debugging waste:**
-partway through this session, the assistant's sandbox environment reset
-(lost its working copy of the project) and had to reconstruct files from
-conversation memory. Separately, it turned out the user's own local copy
-had NOT been updated with the assistant's most recent batch of fixes
-(specifically: dynamic sender-phone-by-country, and the new
-`assert_exactly_one_saudi_side()` defensive assertions) — several runs
-failed on issues that were, in fact, already fixed in files the assistant
-had already sent, just not yet applied locally. **The user then shared a
-GitHub repo (https://github.com/hitesh8765/routech_work) that the
-assistant can `git clone` directly (github.com/codeload.github.com/
-raw.githubusercontent.com are allowed network domains for the assistant's
-bash tool)** — this is now the fastest way to verify what's ACTUALLY
-running before diagnosing a confusing/inconsistent failure, rather than
-assuming the local copy matches the last files sent. **Recommended going
-forward: when behavior seems inconsistent with what the code should do,
-clone the repo FIRST to check actual current state before theorizing
-further.** Note: `.auth/` (debug JSON dumps, session state) is gitignored
-and won't be on GitHub — still need the user to paste/upload those
-directly when needed. `reports/diversity_state.json` and
-`reports/booking_report.xlsx` ARE tracked, which is genuinely useful for
-checking tracker state and past results without asking.
+**Open question, NOT YET RESOLVED — per-country phone table vs. simpler
+rule:** a live run after the above fixes showed the RECEIVER (`stakeholders`)
+rejected with "must be 10 digits" for some non-Saudi dropoff country. This
+contradicts our per-country table's entry for whichever country was
+actually used. Two live data points so far:
+  - Dropoff = Saudi Arabia → server said "must be 9 digits" (matches our SA entry)
+  - Dropoff = (some other country, not yet confirmed which) → server said "must be 10 digits"
+This is consistent with a MUCH simpler theory: **the server may just
+require 9 digits for Saudi numbers and 10 digits for every other country,
+full stop** -- not genuine fine-grained per-country formats like the
+Spain=9/Singapore=8/HK=8 examples the user gave (those may be accurate
+real-world telecom standards but not what THIS demo server's validation
+actually checks). **Next step: get the specific failing country from
+`.auth/debug_create_booking_response.json` on the next run, and ask the
+user whether to collapse `data/phone_formats.py` down to just
+"9 for SA, 10 for everyone else"** rather than maintaining the full
+per-country table, if more non-Saudi countries keep coming back expecting
+10 regardless of what our table says for them specifically. Don't
+unilaterally simplify the table without more evidence first -- only one
+data point so far beyond Saudi.
 
-**Fixes landed this session:**
+**New bug found — Pallet booking rejected with "There should be saudi
+arabia country either in pickup or dropoff address" (neither side was
+Saudi per the server), despite our selection logic (`next_fresh_location`,
+`arrange_pickup_dropoff`) appearing correct on close code review — no
+obvious bug found by inspection alone. Added extensive defensive
+assertions throughout BOTH test files (`assert_exactly_one_saudi_side()`
+in `booking_test_helpers.py`, called right after `arrange_pickup_dropoff`
+AND again on the final built `booking_detail` dict, plus sanity checks on
+`next_saudi_side()`'s return value, `next_fresh_location()`'s
+Saudi/non-Saudi correctness, delivery partner never being DHL, and
+non-empty phone/HS-code fields) per the user's explicit instruction to
+"always use assertions wherever possible so we can identify the issue
+fast." **NOT YET RE-CONFIRMED** — next run will show definitively whether
+the bug is in our own code (one of these new assertions will fire,
+pinpointing exactly where) or something else entirely (all assertions
+pass here, but the server still rejects it — in which case share
+`.auth/debug_create_pallet_booking_response.json` for the real payload).
 
-1. **`DEFAULT_PHONE_FORMAT` fallback changed from 9 → 10 digits**
-   (`data/phone_formats.py`), per direct user instruction. The per-country
-   table (§ Mobile number validation, above) still takes priority for any
-   ISO code it covers; this only affects countries NOT in the table.
+**Session note:** the sandbox environment hosting this framework's working
+copy was reset between conversation turns (lost all files). All files were
+reconstructed from conversation history/memory and re-verified
+(compile-checked + smoke-tested) before being resent. No functional
+regressions expected, but if anything seems to have reverted to an older
+behavior unexpectedly, flag it — that would be a reconstruction slip to
+diff against the files the user already has saved locally.
 
-2. **Delivery partner rotation narrowed to `["ups", "aramex"]` only**
-   (`data/diversity_tracker.py`'s `DELIVERY_PARTNER_ROTATION`), as a
-   stability fix. A run failed with a truncated
-   `"booking_detail_0_delivery_partner..."` error while the rotation had
-   reached one of the `fedex_*`/`darb` variants — these were NEVER
-   individually confirmed as valid, selectable `delivery_partners` values
-   via live recon (only `ups` and `aramex` were actually seen chosen in a
-   real successful UI booking). **Working theory (still not fully
-   confirmed):** `get_delivery_and_rate`'s real response shape is STILL an
-   open item (see § Open items) — we've always submitted blank
-   `delivery_rate_*` fields regardless of chosen partner, and the server
-   may reject a `delivery_partners` selection that wasn't actually
-   quoted/available for that specific route/weight. This would also
-   explain the general "sometimes passes, sometimes fails" instability
-   the user noticed, independent of the phone-number issues. **A
-   `dump_debug("get_delivery_and_rate_response", ...)` call was added to
-   both test files** (previously this response was never saved anywhere)
-   — next time a partner-related failure happens, or once enough runs
-   accumulate, inspect `.auth/debug_get_delivery_and_rate_response.json`
-   (or `..._pallet_response.json`) to finally confirm the real shape, then
-   restore the full partner list from the commented-out block in
-   `diversity_tracker.py`, picking only from partners the response
-   actually quotes for that booking rather than blind rotation.
+## 13. Session addendum (2026-09-23, continued) — Pallet dimension rule finalized, repo sync process
 
-3. **Pallet-specific dimension/weight rule (user-specified, with
-   screenshot reference showing a real Pallet booking's Package Detail
-   section: Actual Weight 75, Length 80, Width 75, Height 68):**
-   - Pallet actual weight: always 75–83 (`PALLET_ACTUAL_WEIGHT_RANGE` in
-     `data/booking_payloads.py`).
-   - Pallet dimensions: length > width > height, picked as a whole combo
-     (never independently randomized) from `PALLET_DIMENSION_COMBO_POOL`
-     — 5 fixed combos seeded from the user's reference (80/75/68) plus 4
-     similar variants, cycled randomly.
-   - Parcel's existing pool/range (8–16 weight, teens-range dimensions)
-     is UNCHANGED — this is purely additive, Pallet gets its own pool.
-   - `random_actual_weight()` / `random_dimensions()` now both take a
-     `booking_type` parameter and branch accordingly;
-     `build_booking_detail()` passes `booking_type` through to both.
-   - **If Luggage/Documents need their own distinct weight/dimension
-     ranges too, follow this exact same pattern** (a type-specific pool +
-     range, branched on `booking_type` in the two helper functions) rather
-     than inventing a different mechanism.
+**CRITICAL PROCESS FIX: this repo (https://github.com/hitesh8765/routech_work)
+is now the assistant's source of truth for current file state.** Several
+fixes sent in earlier turns never actually landed in the user's working
+copy (confirmed by `git clone`-ing the repo directly and diffing against
+what should have been there) -- including the first version of the Pallet
+dimension rule below, which was itself then superseded before it was ever
+even applied. **Going forward: `git clone` the repo FIRST whenever
+behavior seems inconsistent with the code, or before making further
+changes to a file that was recently sent** -- don't assume the user's
+local copy matches the last message's attachments. `.auth/` (debug JSON
+dumps) is gitignored and still needs to be shared directly by the user;
+`reports/diversity_state.json` and `reports/booking_report.xlsx` ARE
+tracked and genuinely useful for checking real accumulated results without
+asking.
 
-4. **More defensive assertions added throughout, per the user's explicit
-   standing instruction ("use assertion everywhere wherever needed so we
-   can identify the issue fast")** — this is now a standing expectation
-   for ALL future test code, not a one-time request:
-   - `assert_exactly_one_saudi_side()` (in `booking_test_helpers.py`) —
-     checks right after `arrange_pickup_dropoff()` AND again on the final
-     built `booking_detail` dict, so a future "neither/both side(s) Saudi"
-     server rejection can be immediately localized to either our selection
-     logic or the payload-building step.
-   - Sanity checks on `next_saudi_side()`'s return value, sender/receiver
-     phone non-empty and dial-code-shaped, delivery partner never
-     containing "dhl", HS code non-empty.
-   - Dimension/weight range + ordering assertions matching each booking
-     type's specific rule (§12.3 above) — added to both test files right
-     after `build_*_booking_detail()` is called.
-   - **Going forward: when writing any new test code (new booking types,
-     new flows), add assertions liberally at each step, not just at the
-     final outcome** — the goal is that any failure's root cause is
-     obvious from the assertion message alone, without needing a
-     round-trip through a server error or asking the user for a debug
-     dump.
+**Pallet dimension/weight rule — FINAL version (2026-09-23), replaces
+BOTH the original Parcel-style rule AND a first Pallet-specific attempt
+that was itself wrong:**
 
-**Open items status update:**
-- `get_delivery_and_rate` response shape: still unconfirmed, but NOW being
-  captured via `dump_debug()` in both tests (previously wasn't saved
-  anywhere) — should be resolved on the next failure or dedicated check.
-- Per-country vs. simpler Saudi/non-Saudi phone digit-count theory (see
-  earlier entry in this file): still not fully resolved either, but the
-  `DEFAULT_PHONE_FORMAT` → 10 change (item 1 above) was the user's direct
-  instruction, so treat that as settled for now; the broader question of
-  whether the FULL per-country table is even necessary (vs. just
-  "9 for Saudi, 10 for everyone else") remains open if more countries
-  come back rejected.
+- An earlier attempt used a separate weight-range (75-83) + a
+  length>width>height dimension pool, mirroring Parcel's structure just
+  scaled up. **This was wrong** -- real Pallet packages are a flat, wide
+  footprint with a SMALL height (like an actual shipping pallet), not a
+  scaled-up box.
+- **Correct rule, given directly with a real screenshot reference**
+  (showing Actual Weight 82, Length 100, Width 100, Height 14 as one
+  on-screen example): weight and dimensions are **coupled together as ONE
+  combo**, not independently randomized, and do **NOT** follow
+  length>width>height. The exact 5 approved combos
+  (`actual_weight, length, width, height`):
+  ```
+  (82, 100, 100, 14)
+  (81, 110, 110, 14)
+  (80, 122, 102, 14)
+  (79, 120, 100, 15)
+  (75, 120, 80, 14)
+  ```
+- Implemented as `PALLET_WEIGHT_DIMENSION_COMBOS` in
+  `data/booking_payloads.py` -- a list of 4-tuples, picked whole via
+  `random.choice()`. The old `PALLET_DIMENSION_COMBO_POOL` and
+  `PALLET_ACTUAL_WEIGHT_RANGE` constants were REMOVED entirely (not just
+  deprecated) -- don't resurrect them.
+- `random_actual_weight()` / `random_dimensions()` (the two separate
+  functions) were replaced by a single `random_weight_and_dimensions(booking_type)`
+  that returns `(actual_weight, length, width, height)` together. Parcel's
+  behavior is unchanged (weight and dimension-combo still independently
+  randomized, length>width>height still preserved) -- only Pallet's path
+  changed.
+- `test_02_pallet_booking.py`'s sanity assertion now checks the full
+  `(actual_weight, length, width, height)` tuple is a member of
+  `PALLET_WEIGHT_DIMENSION_COMBOS`, replacing the old
+  separate-range-plus-ordering checks.
+- **If Luggage/Documents need their own weight/dimension rules, check
+  with the user whether they're Parcel-style (independent weight +
+  ordered dimensions) or Pallet-style (coupled combos) before assuming
+  either pattern** -- don't default to copying Parcel's structure again
+  without asking, since that was the mistake the first time for Pallet.
+
+**Other fixes landed this same session (also now actually in this repo,
+confirmed via direct edits against the cloned copy rather than
+reconstruction from memory):**
+- `DEFAULT_PHONE_FORMAT` fallback: 9 -> 10 digits (`data/phone_formats.py`).
+- Delivery partner rotation: RESTORED to the full list (the earlier
+  narrowing to just `ups`/`aramex` was based on incomplete evidence --
+  the accumulated `reports/booking_report.xlsx` showed several fedex
+  variants actually succeeding most of the time), and DHL added per
+  direct user instruction ("start using DHL delivery partner as well") --
+  only plain `"dhl"`, not the `dhl_*` sub-variants. See
+  `data/diversity_tracker.py`.
+- Step-by-step progress printing added: `step()` helper in
+  `booking_test_helpers.py`, called at every major milestone in both test
+  files (locations fetched, side decided, each location picked, partner
+  picked, HS code resolved, rates fetched, booking built, booking created,
+  payment confirmed, final status) -- visible with `pytest -s`, so a
+  failure's exact location is obvious from the terminal transcript alone
+  without needing a debug-file round-trip. **Any new booking-type test
+  should include the same step() calls at the same milestones.**
+- `BookingReport.save()` now catches `PermissionError` (file locked,
+  almost always because it's open in Excel) and raises a clear message
+  instead of a raw zipfile traceback.

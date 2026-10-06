@@ -41,38 +41,24 @@ STATE_PATH = Path(__file__).resolve().parent.parent / "reports" / "diversity_sta
 SAUDI_LOCATION_COOLDOWN = 7    # within the given 6-8 range
 INTL_LOCATION_COOLDOWN = 17    # within the given 15-20 range
 
-# NARROWED (2026-09-23, stability fix): a live run failed with
-# "booking_detail_0_delivery_partner..." (message truncated in terminal,
-# not yet seen in full) while the rotation had progressed into the
-# fedex_*/darb variants below. These were NEVER individually confirmed as
-# valid, selectable `delivery_partners` values via live recon -- only
-# "ups" and "aramex" were actually seen chosen in a real successful UI
-# booking. Likely root cause (unconfirmed): get_delivery_and_rate's real
-# response shape is STILL unconfirmed (long-standing open item -- see
-# handoff.md), so we've always been submitting blank delivery_rate_*
-# fields regardless of chosen partner; the server may reject a
-# `delivery_partners` selection whose corresponding rate wasn't actually
-# quoted/available for that route. This would also explain the general
-# "sometimes passes, sometimes fails" instability independent of the
-# phone-number issues. Narrowed to the two CONFIRMED-working values as an
-# immediate stability fix. Once get_delivery_and_rate's response shape is
-# finally confirmed (add a dump_debug() call on it and inspect), restore
-# the full list below and pick only from partners the response actually
-# quotes for that booking, rather than blind rotation.
+# RESTORED (2026-09-23): was briefly narrowed to just ["ups", "aramex"]
+# over a suspicion that fedex_* variants weren't valid selections. Checking
+# the actual accumulated reports/booking_report.xlsx disproved that --
+# "Fedex", "Fedex Express", "Fedex Priority", and "Fedex Connect Plus" all
+# show real "Shipment Submitted" successes across multiple runs. The
+# narrowing was the wrong fix; reverted. The "Requested"/intermittent
+# failures are NOT specifically tied to which partner was chosen.
+#
+# DHL added (2026-09-23) per direct user instruction: "start using DHL
+# delivery partner as well" -- supersedes the earlier "keep but don't use"
+# instruction. Only plain "dhl" added, not the dhl_* sub-variants
+# (DHL Medical Express etc.) -- those remain unconfirmed/unused until the
+# user says otherwise, same caution as the fedex sub-variants originally.
 DELIVERY_PARTNER_ROTATION = [
-    "ups", "aramex",
+    "ups", "aramex", "dhl", "fedex", "fedex_priority", "fedex_express",
+    "fedex_regional", "fedex_connect_plus", "fedex_priority_freight",
+    "fedex_regional_economy_freight", "fedex_economy_freight", "darb",
 ]
-# Full list, kept for reference / restoring once availability can be
-# properly checked -- DO NOT re-enable without confirming each value is
-# actually selectable (not just a delivery_rate_* field name, which may
-# not be 1:1 with valid delivery_partners selections):
-#   "fedex", "fedex_priority", "fedex_express", "fedex_regional",
-#   "fedex_connect_plus", "fedex_priority_freight",
-#   "fedex_regional_economy_freight", "fedex_economy_freight", "darb"
-# DHL (plain + every dhl_* variant) stays excluded regardless, per the
-# user's explicit instruction -- keep the labels/mapping in
-# reporting/excel_report.py for when it's needed, just don't pick from it
-# here until told otherwise.
 
 # Backfilled from real bookings already created before this stricter
 # per-booking tracker existed. Last Saudi side used = "pickup" (so the

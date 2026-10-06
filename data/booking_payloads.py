@@ -57,10 +57,8 @@ RECEIVER_NAME_POOL = [
 ]
 
 # Each tuple is (length, width, height) with length > width > height, as
-# specified -- picked as a whole combo, never mixed-and-matched.
-# PARCEL-ONLY (small items). For Pallet, see PALLET_DIMENSION_COMBO_POOL
-# below -- pallets are much bigger/heavier, per the user's explicit rule
-# (2026-09-23).
+# specified -- picked as a whole combo, never mixed-and-matched. PARCEL-ONLY
+# (small items). For Pallet, see PALLET_WEIGHT_DIMENSION_COMBOS below.
 DIMENSION_COMBO_POOL = [
     (14, 13, 11),
     (15, 12, 11),
@@ -70,17 +68,23 @@ DIMENSION_COMBO_POOL = [
 ]
 ACTUAL_WEIGHT_RANGE = (8, 16)
 
-# PALLET-ONLY: actual weight always 75-83; length > width > height, picked
-# as a whole combo from a small fixed pool (reference combo given by the
-# user: 80/75/68), rather than independently randomizing each dimension.
-PALLET_DIMENSION_COMBO_POOL = [
-    (80, 75, 68),
-    (82, 74, 70),
-    (83, 76, 69),
-    (81, 73, 67),
-    (84, 77, 71),
+# PALLET-ONLY rule, REPLACED 2026-09-23 (superseded the previous separate
+# weight-range + length>width>height dimension pool -- that rule is now
+# WRONG and must not be used). Real Pallet package dimensions are a flat,
+# wide footprint with a SMALL height (like an actual shipping pallet),
+# e.g. length==width==100 with height only 14 -- NOT length>width>height.
+# Each (actual_weight, length, width, height) 4-tuple is used as ONE
+# coupled combo -- weight and dimensions are NOT independently randomized
+# for Pallet, unlike Parcel. Exact combos given directly by the user, with
+# a real screenshot reference (Actual Weight 82, Length 100, Width 100,
+# Height 14 was one of the on-screen examples):
+PALLET_WEIGHT_DIMENSION_COMBOS = [
+    (82, 100, 100, 14),
+    (81, 110, 110, 14),
+    (80, 122, 102, 14),
+    (79, 120, 100, 15),
+    (75, 120, 80, 14),
 ]
-PALLET_ACTUAL_WEIGHT_RANGE = (75, 83)
 
 DELIVERY_PARTNER_RATE_FIELDS = [
     "delivery_rate_ups", "delivery_rate_dhl", "delivery_rate_aramex",
@@ -94,16 +98,25 @@ DELIVERY_PARTNER_RATE_FIELDS = [
 ]
 
 
-def random_actual_weight(booking_type: str = "parcel") -> int:
-    if booking_type == "pallet":
-        return random.randint(*PALLET_ACTUAL_WEIGHT_RANGE)
-    return random.randint(*ACTUAL_WEIGHT_RANGE)
+def random_weight_and_dimensions(booking_type: str = "parcel") -> tuple:
+    """
+    Returns (actual_weight, length, width, height) as ONE combo.
 
+    Parcel: weight and dimension-combo are independently randomized
+    (weight from ACTUAL_WEIGHT_RANGE; dims as a whole combo from
+    DIMENSION_COMBO_POOL, preserving length>width>height) -- unchanged
+    from the original rule.
 
-def random_dimensions(booking_type: str = "parcel") -> tuple:
+    Pallet: all four values picked together, whole, from
+    PALLET_WEIGHT_DIMENSION_COMBOS -- weight and dimensions are coupled
+    per the user's exact given combos, NOT independently randomized, and
+    do NOT follow length>width>height (see comment above the pool).
+    """
     if booking_type == "pallet":
-        return random.choice(PALLET_DIMENSION_COMBO_POOL)
-    return random.choice(DIMENSION_COMBO_POOL)
+        return random.choice(PALLET_WEIGHT_DIMENSION_COMBOS)
+    actual_weight = random.randint(*ACTUAL_WEIGHT_RANGE)
+    length, width, height = random.choice(DIMENSION_COMBO_POOL)
+    return actual_weight, length, width, height
 
 
 def random_mobile_for_country(iso_country_code: str) -> tuple:
@@ -174,8 +187,7 @@ def build_booking_detail(
     holder's name, confirmed via live capture).
     """
     item = random_item()
-    actual_weight = random_actual_weight(booking_type)
-    length, width, height = random_dimensions(booking_type)
+    actual_weight, length, width, height = random_weight_and_dimensions(booking_type)
 
     # Receiver is physically at the dropoff location; sender at pickup.
     # Phone format (dial code + digit count) should match each side's own

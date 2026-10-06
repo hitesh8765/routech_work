@@ -8,18 +8,23 @@ IDENTICAL to Parcel's except `booking_type: "pallet"` (and the absence of
 Diversity rules (given by the user, refined 2026-09-22) -- apply PER
 BOOKING, not per booking type: Saudi side strictly alternates globally
 (next_saudi_side()), locations respect reuse cooldowns
-(next_fresh_location()), delivery partner round-robins with DHL excluded
-(next_delivery_partner()).
+(next_fresh_location()), delivery partner round-robins (next_delivery_partner()
+-- full list including DHL and all fedex variants, re-confirmed working via
+real accumulated report data, see data/diversity_tracker.py).
 
-Per the user's explicit instruction (2026-09-22): assertions are used
-liberally throughout, including BEFORE hitting the API where possible --
-added specifically after a real run where this booking was rejected
-server-side with "There should be saudi arabia country either in pickup
-or dropoff address" despite the selection logic appearing correct on
-review. These assertions will immediately show whether a future
-occurrence is a bug in our own selection/payload-building code (assertion
-fires here) or something else (assertion passes here, server still
-rejects -- needs the raw request payload to diagnose further).
+Pallet-specific dimension/weight rule (REPLACED 2026-09-23, user-specified,
+with screenshot reference showing Actual Weight 82, Length 100, Width 100,
+Height 14): weight and dimensions are picked together as ONE coupled combo
+from a small fixed list -- NOT independently randomized, and NOT
+length>width>height (an earlier, now-superseded version of this rule was
+wrong on both counts). See PALLET_WEIGHT_DIMENSION_COMBOS in
+data/booking_payloads.py for the exact approved combos.
+
+Per the user's standing instruction: assertions are used liberally
+throughout, including BEFORE hitting the API where possible, AND step()
+progress markers print to the terminal (visible with `pytest -s`) at every
+major milestone, so a failure's location is immediately obvious from the
+terminal output alone.
 
 See handoff.md for the full confirmed API contract and any open items.
 """
@@ -32,6 +37,7 @@ from data.booking_payloads import (
     build_pallet_booking_detail,
     RECEIVER_NAME_POOL,
     ITEM_NAME_POOL,
+    PALLET_WEIGHT_DIMENSION_COMBOS,
 )
 from data.diversity_tracker import next_saudi_side, next_fresh_location, next_delivery_partner
 from utils.html_parsing import saudi_locations, non_saudi_locations
@@ -50,6 +56,7 @@ from tests.api.bookings.booking_test_helpers import (
     extract_booking_id,
     wait_for_terminal_status,
     assert_exactly_one_saudi_side,
+    step,
 )
 
 
@@ -60,8 +67,9 @@ def test_create_pallet_booking(api_client, booking_report):
     Creates one Pallet booking, driven entirely by the diversity tracker:
     Saudi side alternates globally from the last booking of any type, the
     specific pickup/dropoff locations respect their reuse cooldowns, and
-    the delivery partner is the next one in the rotation (DHL excluded).
+    the delivery partner is the next one in the rotation.
     """
+    step("START test_create_pallet_booking")
 
     # 1. saved locations, picked with per-booking reuse cooldowns applied
     all_locations = api_client.get_saved_locations(booking_type="pallet")
@@ -71,27 +79,31 @@ def test_create_pallet_booking(api_client, booking_report):
     intl_locations = non_saudi_locations(all_locations)
     assert sa_locations, "No saved Saudi Arabia locations available on this account."
     assert intl_locations, "No saved non-Saudi locations available on this account."
+    step("locations fetched", total=len(all_locations), saudi_count=len(sa_locations), intl_count=len(intl_locations))
 
     saudi_side = next_saudi_side()
     assert saudi_side in ("pickup", "dropoff"), f"next_saudi_side() returned unexpected value: {saudi_side!r}"
+    step("saudi_side decided", saudi_side=saudi_side)
 
     saudi_location = next_fresh_location(sa_locations, is_saudi=True)
     assert (saudi_location.get("country_code") or "").upper() == "SA", (
         f"next_fresh_location(is_saudi=True) returned a non-Saudi location: {saudi_location!r}"
     )
+    step("saudi_location picked", id=saudi_location.get("id"), city=saudi_location.get("city"), country=saudi_location.get("country"))
 
     intl_location = next_fresh_location(intl_locations, is_saudi=False)
     assert (intl_location.get("country_code") or "").upper() != "SA", (
         f"next_fresh_location(is_saudi=False) returned a Saudi location: {intl_location!r}"
     )
+    step("intl_location picked", id=intl_location.get("id"), city=intl_location.get("city"), country=intl_location.get("country"))
 
     pickup, dropoff = arrange_pickup_dropoff(saudi_location, intl_location, saudi_side=saudi_side)
     assert_exactly_one_saudi_side(pickup, dropoff, context="after arrange_pickup_dropoff (pallet)")
+    step("pickup/dropoff arranged", pickup_country=pickup.get("country"), dropoff_country=dropoff.get("country"))
 
     delivery_partner = next_delivery_partner()
-    assert delivery_partner and "dhl" not in delivery_partner.lower(), (
-        f"next_delivery_partner() returned {delivery_partner!r} -- DHL must never be selected."
-    )
+    assert delivery_partner, "next_delivery_partner() returned an empty value."
+    step("delivery_partner picked", delivery_partner=delivery_partner)
 
     receiver_name = random.choice(RECEIVER_NAME_POOL)
 
@@ -100,6 +112,7 @@ def test_create_pallet_booking(api_client, booking_report):
     hs_code_response = api_client.get_hs_codes(item_name_for_lookup)
     hs_code = first_hs_code(hs_code_response)
     assert hs_code, "first_hs_code() returned an empty value."
+    step("hs_code resolved", item_name=item_name_for_lookup, hs_code=hs_code)
 
     # 3. delivery rate quote
     rate_payload = {
@@ -131,6 +144,7 @@ def test_create_pallet_booking(api_client, booking_report):
     }
     delivery_rates = api_client.get_delivery_and_rate(rate_payload)
     dump_debug("get_delivery_and_rate_pallet_response", delivery_rates)
+    step("delivery_rates fetched")
 
     # 4. build + create booking
     booking_detail = build_pallet_booking_detail(
@@ -153,20 +167,34 @@ def test_create_pallet_booking(api_client, booking_report):
     assert booking_detail["country_code"].startswith("+"), f"Receiver dial code looks wrong: {booking_detail['country_code']!r}"
     assert booking_detail["sender_country_code"].startswith("+"), f"Sender dial code looks wrong: {booking_detail['sender_country_code']!r}"
 
-    # Pallet-specific rule (2026-09-23): actual weight 75-83, length > width > height.
+    # Pallet-specific rule (REPLACED 2026-09-23): weight+dimensions must be
+    # exactly one of the user-given coupled combos -- NOT independently
+    # randomized, and NOT length>width>height (that was the old, now-wrong
+    # rule). See PALLET_WEIGHT_DIMENSION_COMBOS in data/booking_payloads.py.
     pkg = booking_detail["package_dimensions"][0]
     actual_weight, length, width, height = int(pkg["actual_weight"]), int(pkg["length"]), int(pkg["width"]), int(pkg["height"])
-    assert 75 <= actual_weight <= 83, f"Pallet actual_weight out of range: {actual_weight} (expected 75-83)"
-    assert length > width > height, f"Pallet dimensions must satisfy length>width>height, got {(length, width, height)}"
+    assert (actual_weight, length, width, height) in PALLET_WEIGHT_DIMENSION_COMBOS, (
+        f"Pallet weight/dimensions {(actual_weight, length, width, height)} is not one of the "
+        f"approved combos: {PALLET_WEIGHT_DIMENSION_COMBOS}"
+    )
+    step(
+        "booking_detail built",
+        receiver_phone=f"{booking_detail['country_code']}{booking_detail['stakeholders']}",
+        sender_phone=f"{booking_detail['sender_country_code']}{booking_detail['sender_mobile_number']}",
+        weight=actual_weight,
+        dims=(length, width, height),
+    )
 
     create_response = api_client.create_booking(booking_detail)
     dump_debug("create_pallet_booking_response", create_response)
+    step("create_booking response received", top_level_status=create_response.get("status"))
     raise_if_error_status(create_response, context="create_booking (pallet)")
     booking_id = extract_booking_id(create_response)
     assert create_response.get("payment_array"), (
         "create_booking response has no payment_array -- "
         "see .auth/debug_create_pallet_booking_response.json for the full payload."
     )
+    step("booking created", booking_id=booking_id)
 
     # 5. pay via wallet
     payment_response = api_client.make_ppd_payment(create_response, is_wallet=True)
@@ -175,10 +203,12 @@ def test_create_pallet_booking(api_client, booking_report):
     assert payment_response and payment_response.get("status") is True, (
         f"Payment did not report success: {payment_response!r}"
     )
+    step("payment confirmed")
 
     # 6. verify
     booking_number = api_client.booking_number_from_details(booking_id)
     assert booking_number, "Booking number not found in get_booking_details response."
+    step("booking_number resolved", booking_number=booking_number)
 
     details_html = api_client.get_booking_details_html(booking_id)
     assert "Pallet" in details_html
@@ -186,6 +216,7 @@ def test_create_pallet_booking(api_client, booking_report):
     # 7. log to the Excel report (location/partner/side usage already
     #    recorded atomically by the next_* tracker calls above)
     status = wait_for_terminal_status(api_client, booking_id, SUCCESS_STATUSES, FAILURE_STATUSES)
+    step("final status polled", status=status)
     booking_report.add_row(
         booking_type=booking_type_label(
             booking_type="pallet",

@@ -11,6 +11,18 @@ DEBUG_DIR = Path(__file__).resolve().parent.parent.parent.parent / ".auth"
 DEBUG_DIR.mkdir(exist_ok=True)
 
 
+def step(label: str, **details):
+    """
+    Prints a single-line progress marker to the terminal (visible with
+    `pytest -s`), so the full flow is traceable live without digging
+    through debug JSON files after the fact. Added 2026-09-23 per the
+    user's "I want to know at what point it is failing" request -- call
+    this at every major milestone in a test, not just at the end.
+    """
+    extra = " ".join(f"{k}={v!r}" for k, v in details.items())
+    print(f"[step] {label}" + (f" -- {extra}" if extra else ""))
+
+
 def dump_debug(name: str, data) -> Path:
     """
     Writes the full raw response to a JSON file so we can inspect it

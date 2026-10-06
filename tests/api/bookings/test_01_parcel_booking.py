@@ -49,6 +49,7 @@ from tests.api.bookings.booking_test_helpers import (
     extract_booking_id,
     wait_for_terminal_status,
     assert_exactly_one_saudi_side,
+    step,
 )
 
 
@@ -56,6 +57,7 @@ from tests.api.bookings.booking_test_helpers import (
 @pytest.mark.parcel
 def test_create_parcel_booking(api_client, booking_report):
     """Creates exactly one Parcel booking, side/location/partner all driven by the global diversity tracker."""
+    step("START test_create_parcel_booking")
 
     # 1. saved locations, picked with per-booking reuse cooldowns applied
     all_locations = api_client.get_saved_locations(booking_type="parcel")
@@ -65,27 +67,31 @@ def test_create_parcel_booking(api_client, booking_report):
     intl_locations = non_saudi_locations(all_locations)
     assert sa_locations, "No saved Saudi Arabia locations available on this account."
     assert intl_locations, "No saved non-Saudi locations available on this account."
+    step("locations fetched", total=len(all_locations), saudi_count=len(sa_locations), intl_count=len(intl_locations))
 
     saudi_side = next_saudi_side()
     assert saudi_side in ("pickup", "dropoff"), f"next_saudi_side() returned unexpected value: {saudi_side!r}"
+    step("saudi_side decided", saudi_side=saudi_side)
 
     saudi_location = next_fresh_location(sa_locations, is_saudi=True)
     assert (saudi_location.get("country_code") or "").upper() == "SA", (
         f"next_fresh_location(is_saudi=True) returned a non-Saudi location: {saudi_location!r}"
     )
+    step("saudi_location picked", id=saudi_location.get("id"), city=saudi_location.get("city"), country=saudi_location.get("country"))
 
     intl_location = next_fresh_location(intl_locations, is_saudi=False)
     assert (intl_location.get("country_code") or "").upper() != "SA", (
         f"next_fresh_location(is_saudi=False) returned a Saudi location: {intl_location!r}"
     )
+    step("intl_location picked", id=intl_location.get("id"), city=intl_location.get("city"), country=intl_location.get("country"))
 
     pickup, dropoff = arrange_pickup_dropoff(saudi_location, intl_location, saudi_side=saudi_side)
     assert_exactly_one_saudi_side(pickup, dropoff, context="after arrange_pickup_dropoff (parcel)")
+    step("pickup/dropoff arranged", pickup_country=pickup.get("country"), dropoff_country=dropoff.get("country"))
 
     delivery_partner = next_delivery_partner()
-    assert delivery_partner and "dhl" not in delivery_partner.lower(), (
-        f"next_delivery_partner() returned {delivery_partner!r} -- DHL must never be selected."
-    )
+    assert delivery_partner, "next_delivery_partner() returned an empty value."
+    step("delivery_partner picked", delivery_partner=delivery_partner)
 
     receiver_name = random.choice(RECEIVER_NAME_POOL)
 
@@ -96,6 +102,7 @@ def test_create_parcel_booking(api_client, booking_report):
     hs_code_response = api_client.get_hs_codes(item_name_for_lookup)
     hs_code = first_hs_code(hs_code_response)
     assert hs_code, "first_hs_code() returned an empty value."
+    step("hs_code resolved", item_name=item_name_for_lookup, hs_code=hs_code)
 
     # 3. delivery rate quote
     rate_payload = {
@@ -127,6 +134,7 @@ def test_create_parcel_booking(api_client, booking_report):
     }
     delivery_rates = api_client.get_delivery_and_rate(rate_payload)
     dump_debug("get_delivery_and_rate_response", delivery_rates)
+    step("delivery_rates fetched")
 
     # 4. build + create booking
     booking_detail = build_parcel_booking_detail(
@@ -154,15 +162,24 @@ def test_create_parcel_booking(api_client, booking_report):
     actual_weight, length, width, height = int(pkg["actual_weight"]), int(pkg["length"]), int(pkg["width"]), int(pkg["height"])
     assert 8 <= actual_weight <= 16, f"Parcel actual_weight out of range: {actual_weight} (expected 8-16)"
     assert length > width > height, f"Parcel dimensions must satisfy length>width>height, got {(length, width, height)}"
+    step(
+        "booking_detail built",
+        receiver_phone=f"{booking_detail['country_code']}{booking_detail['stakeholders']}",
+        sender_phone=f"{booking_detail['sender_country_code']}{booking_detail['sender_mobile_number']}",
+        weight=actual_weight,
+        dims=(length, width, height),
+    )
 
     create_response = api_client.create_booking(booking_detail)
     dump_debug("create_booking_response", create_response)
+    step("create_booking response received", top_level_status=create_response.get("status"))
     raise_if_error_status(create_response, context="create_booking")
     booking_id = extract_booking_id(create_response)
     assert create_response.get("payment_array"), (
         "create_booking response has no payment_array -- "
         "see .auth/debug_create_booking_response.json for the full payload."
     )
+    step("booking created", booking_id=booking_id)
 
     # 5. pay via wallet (server already built the exact payment_array we need)
     payment_response = api_client.make_ppd_payment(create_response, is_wallet=True)
@@ -171,10 +188,12 @@ def test_create_parcel_booking(api_client, booking_report):
     assert payment_response and payment_response.get("status") is True, (
         f"Payment did not report success: {payment_response!r}"
     )
+    step("payment confirmed")
 
     # 6. verify
     booking_number = api_client.booking_number_from_details(booking_id)
     assert booking_number, "Booking number not found in get_booking_details response."
+    step("booking_number resolved", booking_number=booking_number)
 
     details_html = api_client.get_booking_details_html(booking_id)
     assert "Parcel" in details_html
@@ -182,6 +201,7 @@ def test_create_parcel_booking(api_client, booking_report):
     # 7. log to the Excel report (location/partner/side usage already
     #    recorded atomically by the next_* tracker calls above)
     status = wait_for_terminal_status(api_client, booking_id, SUCCESS_STATUSES, FAILURE_STATUSES)
+    step("final status polled", status=status)
     booking_report.add_row(
         booking_type=booking_type_label(
             booking_type="parcel",
