@@ -54,11 +54,32 @@ INTL_LOCATION_COOLDOWN = 17    # within the given 15-20 range
 # instruction. Only plain "dhl" added, not the dhl_* sub-variants
 # (DHL Medical Express etc.) -- those remain unconfirmed/unused until the
 # user says otherwise, same caution as the fedex sub-variants originally.
+#
+# FREIGHT variants removed (2026-10-07) -- REAL server error evidence,
+# not a guess: "fedex_priority_freight" was rejected with
+# booking.please_select_delivery_partners / "Please try again with
+# another delivery partner or change the location." (Saudi-Spain route),
+# and "fedex_regional_economy_freight" was rejected with
+# system.please_enter_valid_location (Niger-Saudi route) in the SAME test
+# run. Unlike the standard fedex_* variants above (which have multiple
+# CONFIRMED successes in the report), NONE of the three "_freight" suffixed
+# variants (fedex_priority_freight, fedex_regional_economy_freight,
+# fedex_economy_freight) have ever succeeded. These are freight/bulk-cargo
+# services, likely with different route/weight eligibility than standard
+# express/priority parcel services -- plausibly not offered at all for
+# arbitrary routes on this demo account. Removed from rotation; "darb" is
+# left in despite having no confirmed success OR failure yet (no evidence
+# against it specifically) -- watch for it in future runs.
 DELIVERY_PARTNER_ROTATION = [
     "ups", "aramex", "dhl", "fedex", "fedex_priority", "fedex_express",
-    "fedex_regional", "fedex_connect_plus", "fedex_priority_freight",
-    "fedex_regional_economy_freight", "fedex_economy_freight", "darb",
+    "fedex_regional", "fedex_connect_plus", "darb",
 ]
+# Freight variants kept here for reference, NOT in the active rotation --
+# do not re-add without confirming the server actually accepts them for
+# some route (e.g. a much heavier/larger shipment than our current weight
+# ranges, if "freight" implies a minimum weight threshold):
+#   "fedex_priority_freight", "fedex_regional_economy_freight",
+#   "fedex_economy_freight"
 
 # Backfilled from real bookings already created before this stricter
 # per-booking tracker existed. Last Saudi side used = "pickup" (so the

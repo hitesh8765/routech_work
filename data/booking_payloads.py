@@ -119,18 +119,24 @@ def random_weight_and_dimensions(booking_type: str = "parcel") -> tuple:
     return actual_weight, length, width, height
 
 
-def random_mobile_for_country(iso_country_code: str) -> tuple:
+def random_mobile_for_country(iso_country_code: str, max_digits: int = None) -> tuple:
     """
     Returns (dial_code, local_number) matching the given country's real
-    phone format (digit count) -- see data/phone_formats.py. Used for
-    BOTH the receiver (matched to dropoff country) and sender (matched to
-    pickup country) per the user's explicit instructions (2026-09-22).
-    Avoids a leading 0 so the number looks like a plausible real mobile.
+    phone format (digit count). If max_digits is specified (e.g., for FedEx),
+    ensures the local_number doesn't exceed that length.
     """
     fmt = get_phone_format(iso_country_code)
-    digits = [str(random.randint(1, 9))] + [str(random.randint(0, 9)) for _ in range(fmt.digits - 1)]
-    return fmt.dial_code, "".join(digits)
-
+    
+    # Determine the actual digit count to use
+    if max_digits is not None:
+        # Use the smaller of the country's natural length or the max
+        digits = min(fmt.digits, max_digits)
+    else:
+        digits = fmt.digits
+    
+    # Generate digits, avoiding leading 0
+    mobile_digits = [str(random.randint(1, 9))] + [str(random.randint(0, 9)) for _ in range(digits - 1)]
+    return fmt.dial_code, "".join(mobile_digits)
 
 def random_item() -> dict:
     return {

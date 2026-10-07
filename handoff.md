@@ -732,3 +732,92 @@ reconstruction from memory):**
 - `BookingReport.save()` now catches `PermissionError` (file locked,
   almost always because it's open in Excel) and raises a clear message
   instead of a raw zipfile traceback.
+
+## 14. Session addendum (2026-10-07) — FedEx digit-cap theory REJECTED with evidence
+
+A third-party analysis (pasted in by the user, apparently from another AI
+tool) proposed that FedEx enforces a strict 10-digit phone number limit
+regardless of country, and suggested capping `random_mobile_for_country()`
+at 10 digits whenever the delivery partner starts with "fedex". **This was
+checked against the actual accumulated `reports/booking_report.xlsx` data
+and REJECTED** -- the evidence contradicts it:
+- The failures (status "Requested", not transitioning to a terminal state)
+  occurred on **France (9 digits)** and **United States (10 digits)** --
+  both already within the claimed 10-digit cap.
+- The SAME delivery partners (Fedex Express, Fedex Priority) succeeded
+  cleanly in OTHER runs with no digit-count correlation.
+- If a hard 10-digit FedEx cap were real, failures should correlate with
+  countries needing MORE than 10 digits (China=11, Brazil=11) -- no such
+  correlation is visible in the data.
+
+**Do not apply a FedEx-specific phone digit cap without first seeing a
+real server error message that explicitly says so.** The "Requested"
+stuck-status issue looks more like genuine server-side processing
+variance than a data-shape problem. Applied instead:
+- `wait_for_terminal_status()`'s timeout increased 15s -> 30s (safe,
+  evidence-supported fix for the "Requested" timing issue specifically).
+- Both test files now dump the outgoing `booking_detail` payload itself
+  (`dump_debug("booking_detail_payload", ...)` /
+  `dump_debug("pallet_booking_detail_payload", ...)`) right before
+  `create_booking()` is called, independent of what the response echoes
+  back -- useful for diagnosing payload-shape issues going forward.
+
+**Lesson for future sessions: when the user pastes in analysis or a
+proposed fix from another source (another AI, a teammate, etc.), check it
+against real accumulated data (the report / diversity state / debug
+files) before applying it, rather than trusting the stated reasoning at
+face value** -- it can sound plausible and still be wrong, as happened
+here. The two "top_level_status='error'" failures in the screenshots that
+prompted this (distinct from the "Requested" timing issue) are still
+UNRESOLVED -- the real validation message was cut off in the shared
+screenshots; still need `.auth/debug_create_booking_response.json` /
+`.auth/debug_create_pallet_booking_response.json` from an actual failing
+run to diagnose properly.
+
+## 15. Session addendum (2026-10-07, continued) — Freight FedEx variants identified as the real cause, with evidence
+
+User shared the actual `.auth/debug_create_booking_response.json` /
+`debug_create_pallet_booking_response.json` files from a real failing
+run, resolving the open question from §14.
+
+**Real server error messages (not truncated this time):**
+- Parcel (`fedex_priority_freight`, Saudi→Spain route):
+  `{"param": "booking_detail_0_delivery_partners", "msg": "Please try again with another delivery partner or change the location.", "key": "booking.please_select_delivery_partners"}`
+- Pallet (`fedex_regional_economy_freight`, Niger→Saudi route):
+  `{"param": "booking_detail_0_dropoff_address", "msg": "Please enter valid location.", "key": "system.please_enter_valid_location"}`
+
+**Root cause identified with real evidence:** both failures used one of
+the three "_freight" suffixed FedEx variants
+(`fedex_priority_freight`, `fedex_regional_economy_freight`,
+`fedex_economy_freight`). Cross-checking `reports/booking_report.xlsx`:
+the STANDARD fedex variants (`fedex`, `fedex_priority`, `fedex_express`,
+`fedex_connect_plus`) have multiple confirmed "Shipment Submitted"
+successes; **none of the three freight variants have ever succeeded, in
+any run.** These are freight/bulk-cargo services, plausibly with
+different route/weight eligibility than standard express/priority parcel
+services (or simply not offered at all on this demo account for arbitrary
+routes). Removed from `DELIVERY_PARTNER_ROTATION` in
+`data/diversity_tracker.py` (kept as a comment for reference, not deleted
+outright, in case a future need arises to test them deliberately against
+a much larger/heavier shipment). `"darb"` is left in the rotation despite
+having no confirmed success OR failure yet — watch for it.
+
+**This also retroactively confirms §14's rejection of the "FedEx has a
+hard 10-digit phone cap" theory was correct** — the real cause was
+specific-partner-unavailability, nothing to do with phone number length.
+The user's own instinct ("i think it fail in while booking in fedex")
+was directionally right, just needed narrowing to the freight-specific
+sub-variants rather than FedEx broadly.
+
+**Not yet investigated, flagged for later if it recurs:** the Pallet
+failure's pickup location (Niger, a country not seen in any prior
+booking) had an EMPTY `pickup_postal_code` in the submitted payload. This
+may be a data-quality issue specific to that one saved location (possibly
+why the server's generic validator attributed the error to
+`dropoff_address` despite pickup being the side with missing data) rather
+than a real problem. Since the freight-partner fix addresses the
+STRONGER, dual-failure-confirmed pattern, this is left as a secondary
+watch-item rather than acted on now — if "please enter valid location"
+recurs on a NON-freight-partner booking, revisit this specific location's
+data quality (check Niger's postal_code attribute in a fresh
+`/bookings/booking_form` fetch).

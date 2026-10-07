@@ -113,7 +113,7 @@ def wait_for_terminal_status(
     booking_id: str,
     success_statuses: set,
     failure_statuses: set,
-    timeout: float = 15,
+    timeout: float = 30,
     interval: float = 2,
 ):
     """
@@ -121,6 +121,18 @@ def wait_for_terminal_status(
     (from either success_statuses or failure_statuses) is reached, or
     timeout elapses. Handles the apparent async delay between payment
     completing and the booking's status actually updating server-side.
+
+    Timeout increased 15s -> 30s (2026-10-07): real accumulated report
+    data (reports/booking_report.xlsx) shows the SAME delivery partner +
+    country pair sometimes lands on "Shipment Submitted" and other times
+    gets stuck on "Requested" -- NOT correlated with phone number digit
+    count (ruled out: failures occurred on 9/10-digit countries, well
+    within any claimed limit, while other runs with longer numbers
+    succeeded fine). This looks like genuine server-side processing
+    variance, not a data-shape issue -- giving it more time to settle is
+    the safe fix. If "Requested" still shows up as a FINAL status even
+    after 30s on a future run, that's evidence it's NOT just timing and
+    needs separate investigation.
     """
     deadline = time.time() + timeout
     last_status = None

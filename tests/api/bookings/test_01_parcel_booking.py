@@ -169,6 +169,7 @@ def test_create_parcel_booking(api_client, booking_report):
         weight=actual_weight,
         dims=(length, width, height),
     )
+    dump_debug("booking_detail_payload", booking_detail)
 
     create_response = api_client.create_booking(booking_detail)
     dump_debug("create_booking_response", create_response)
