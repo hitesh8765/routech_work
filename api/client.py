@@ -38,6 +38,11 @@ from playwright.sync_api import sync_playwright, APIRequestContext
 from config import settings
 from utils.html_parsing import extract_csrf_token, parse_pickup_locations, extract_status_badge
 
+# /bookings/add and /bookings/make_ppd_payment can be slow on the demo
+# server (a pallet booking timed out at Playwright's 30s default on
+# 2026-10-07). Give the two state-changing calls 90s.
+BOOKING_WRITE_TIMEOUT_MS = 90_000
+
 
 class RoutechAPIClient:
     def __init__(self, storage_state_path):
@@ -216,12 +221,12 @@ class RoutechAPIClient:
             "delivery_partner_track_0": "1",
             "is_booking_confirm": "true",
         }
-        resp = self.request.post("/bookings/add", multipart=multipart)
+        resp = self.request.post("/bookings/add", multipart=multipart, timeout=BOOKING_WRITE_TIMEOUT_MS)
         if resp.status == 403:
             # csrf token likely stale -- refresh once and retry.
             token = self.csrf_token(force_refresh=True)
             multipart["_csrf"] = token
-            resp = self.request.post("/bookings/add", multipart=multipart)
+            resp = self.request.post("/bookings/add", multipart=multipart, timeout=BOOKING_WRITE_TIMEOUT_MS)
         self._check_ok(resp)
         return self._safe_json(resp)
 
@@ -273,7 +278,7 @@ class RoutechAPIClient:
             "payment_array": json.dumps(payment_array),
             "payment_type": json.dumps(["wallet"] if is_wallet else ["online"]),
         }
-        resp = self.request.post("/bookings/make_ppd_payment", multipart=multipart)
+        resp = self.request.post("/bookings/make_ppd_payment", multipart=multipart, timeout=BOOKING_WRITE_TIMEOUT_MS)
         self._check_ok(resp)
         return self._safe_json(resp)
 

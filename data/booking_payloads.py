@@ -98,6 +98,88 @@ DELIVERY_PARTNER_RATE_FIELDS = [
 ]
 
 
+def extract_available_partners(delivery_rates: dict) -> list:
+    """
+    RULE (user-mandated 2026-10-07, backed by real response data): only
+    partners that have a REAL quoted amount for this route may be selected.
+
+    /bookings/get_delivery_and_rate returns a 'days' dict (every partner the
+    route theoretically supports) and an 'amount' dict (only partners with
+    an actual price). Choosing a partner that is in 'days' but missing from
+    'amount' is either rejected outright ("Please try again with another
+    delivery partner or change the location") or creates a booking that is
+    stuck on status "Requested" forever and never shows in the application.
+
+    A partner counts as available only if it is in 'amount' AND its
+    payable_amount is a positive number. (A payable_amount of 0 was seen
+    for aramex on one pallet route; a booking with no price, ppd_amount
+    null, was the stuck one -- so 0 is treated as "no real quote".)
+    """
+    amounts = (delivery_rates or {}).get("amount", {}) or {}
+    available = []
+    for partner, info in amounts.items():
+        payable = (info or {}).get("payable_amount")
+        if isinstance(payable, (int, float)) and payable > 0:
+            available.append(partner)
+    return available
+
+
+def volumetric_weight(length: int, width: int, height: int) -> float:
+    """
+    Dimensional weight as the app computes it: L*W*H / 5000, rounded UP to
+    the nearest 0.5 (verified against real responses: 100x100x14 -> 28,
+    120x100x15 -> 36, 15x12x11 -> 0.5).
+    """
+    import math
+    return math.ceil((length * width * height / 5000) * 2) / 2
+
+
+def build_rate_payload(
+    booking_type: str,
+    pickup: dict,
+    dropoff: dict,
+    actual_weight: int,
+    length: int,
+    width: int,
+    height: int,
+) -> dict:
+    """
+    Payload for /bookings/get_delivery_and_rate built from the REAL
+    weight/dimensions of the booking about to be created. (Previously the
+    tests quoted a fixed 10 kg 15x12x11 parcel even for Pallet bookings, so
+    availability was being checked against the wrong shipment.)
+    """
+    dimension_weight = volumetric_weight(length, width, height)
+    higher_weight = max(actual_weight, dimension_weight)
+    return {
+        "type": "b2c",
+        "pickup_city": pickup.get("city", ""),
+        "dropoff_city": dropoff.get("city", ""),
+        "pickup_country": pickup.get("country", ""),
+        "dropoff_country": dropoff.get("country", ""),
+        "pickup_country_code": pickup.get("country_code", ""),
+        "dropoff_country_code": dropoff.get("country_code", ""),
+        "dropoff_postal_code": dropoff.get("postal_code", ""),
+        "pickup_postal_code": pickup.get("postal_code", ""),
+        "pickup_state_code": pickup.get("state", ""),
+        "dropoff_state_code": dropoff.get("state", ""),
+        "is_international": "1",
+        "delivery_reg_same_type": "regular",
+        "payment_type": "ppd",
+        "shipment_content_type": "dry",
+        "weight_per_kg": "",
+        "package_dimension[0][length]": str(length),
+        "package_dimension[0][width]": str(width),
+        "package_dimension[0][height]": str(height),
+        "package_dimension[0][actual_weight]": str(actual_weight),
+        "package_dimension[0][weight]": str(dimension_weight),
+        "package_dimension[0][higher_weight]": str(higher_weight),
+        "offer_code": "",
+        "booking_type": booking_type,
+        "is_palletized": "false",
+    }
+
+
 def random_weight_and_dimensions(booking_type: str = "parcel") -> tuple:
     """
     Returns (actual_weight, length, width, height) as ONE combo.
@@ -119,24 +201,18 @@ def random_weight_and_dimensions(booking_type: str = "parcel") -> tuple:
     return actual_weight, length, width, height
 
 
-def random_mobile_for_country(iso_country_code: str, max_digits: int = None) -> tuple:
+def random_mobile_for_country(iso_country_code: str) -> tuple:
     """
     Returns (dial_code, local_number) matching the given country's real
-    phone format (digit count). If max_digits is specified (e.g., for FedEx),
-    ensures the local_number doesn't exceed that length.
+    phone format (digit count) -- see data/phone_formats.py. Used for
+    BOTH the receiver (matched to dropoff country) and sender (matched to
+    pickup country) per the user's explicit instructions (2026-09-22).
+    Avoids a leading 0 so the number looks like a plausible real mobile.
     """
     fmt = get_phone_format(iso_country_code)
-    
-    # Determine the actual digit count to use
-    if max_digits is not None:
-        # Use the smaller of the country's natural length or the max
-        digits = min(fmt.digits, max_digits)
-    else:
-        digits = fmt.digits
-    
-    # Generate digits, avoiding leading 0
-    mobile_digits = [str(random.randint(1, 9))] + [str(random.randint(0, 9)) for _ in range(digits - 1)]
-    return fmt.dial_code, "".join(mobile_digits)
+    digits = [str(random.randint(1, 9))] + [str(random.randint(0, 9)) for _ in range(fmt.digits - 1)]
+    return fmt.dial_code, "".join(digits)
+
 
 def random_item() -> dict:
     return {
@@ -169,6 +245,7 @@ def build_booking_detail(
     delivery_rates: dict,
     delivery_partner: str = "ups",
     sender_name: str = "Neeraj Sharma",
+    weight_and_dimensions: tuple = None,
 ) -> dict:
     """
     Builds the exact `booking_detail[0]` dict shape captured live for both
@@ -193,7 +270,9 @@ def build_booking_detail(
     holder's name, confirmed via live capture).
     """
     item = random_item()
-    actual_weight, length, width, height = random_weight_and_dimensions(booking_type)
+    # Weight/dimensions are normally chosen by the caller BEFORE quoting
+    # rates (so availability is checked for the real shipment) and passed in.
+    actual_weight, length, width, height = weight_and_dimensions or random_weight_and_dimensions(booking_type)
 
     # Receiver is physically at the dropoff location; sender at pickup.
     # Phone format (dial code + digit count) should match each side's own
@@ -282,10 +361,15 @@ def build_booking_detail(
     if booking_type == "parcel":
         detail["pallet_container_id"] = ""
 
-    # Merge in whatever per-partner rates the get_delivery_and_rate() call
-    # returned (UI echoes all quoted rates back, not just the chosen one).
+    # Fill delivery_rate_<partner> from the REAL nested response shape
+    # (confirmed 2026-10-07): delivery_rates["amount"][partner]["payable_amount"].
+    # The old code looked for flat "delivery_rate_*" keys that never existed
+    # in the response, so every rate was silently submitted blank.
+    amounts = (delivery_rates or {}).get("amount", {}) or {}
     for field in DELIVERY_PARTNER_RATE_FIELDS:
-        detail[field] = str(delivery_rates.get(field, "")) if delivery_rates.get(field) not in (None, "") else ""
+        partner_key = field[len("delivery_rate_"):]
+        payable = (amounts.get(partner_key) or {}).get("payable_amount")
+        detail[field] = str(payable) if payable not in (None, "") else ""
 
     return detail
 

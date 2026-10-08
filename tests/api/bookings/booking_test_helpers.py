@@ -7,6 +7,14 @@ import json
 import time
 from pathlib import Path
 
+from data.booking_payloads import (
+    arrange_pickup_dropoff,
+    build_rate_payload,
+    extract_available_partners,
+    random_weight_and_dimensions,
+)
+from data.diversity_tracker import next_delivery_partner, next_fresh_location
+
 DEBUG_DIR = Path(__file__).resolve().parent.parent.parent.parent / ".auth"
 DEBUG_DIR.mkdir(exist_ok=True)
 
@@ -113,35 +121,116 @@ def wait_for_terminal_status(
     booking_id: str,
     success_statuses: set,
     failure_statuses: set,
-    timeout: float = 30,
-    interval: float = 2,
+    timeout: float = 60,
+    interval: float = 3,
 ):
     """
-    Polls booking_status_from_details() until a known terminal status
-    (from either success_statuses or failure_statuses) is reached, or
-    timeout elapses. Handles the apparent async delay between payment
-    completing and the booking's status actually updating server-side.
+    Waits up to `timeout` seconds (60 by user request, 2026-10-07) for the
+    booking to reach a known terminal status. Every poll is a FRESH GET of
+    /bookings/get_booking_details/:id -- the equivalent of refreshing the
+    page -- and each status seen is printed so a slow booking is visible
+    live in the terminal.
 
-    Timeout increased 15s -> 30s (2026-10-07): real accumulated report
-    data (reports/booking_report.xlsx) shows the SAME delivery partner +
-    country pair sometimes lands on "Shipment Submitted" and other times
-    gets stuck on "Requested" -- NOT correlated with phone number digit
-    count (ruled out: failures occurred on 9/10-digit countries, well
-    within any claimed limit, while other runs with longer numbers
-    succeeded fine). This looks like genuine server-side processing
-    variance, not a data-shape issue -- giving it more time to settle is
-    the safe fix. If "Requested" still shows up as a FINAL status even
-    after 30s on a future run, that's evidence it's NOT just timing and
-    needs separate investigation.
+    "Requested" is NOT terminal. Root cause of bookings stuck there
+    forever (confirmed 2026-10-07): a delivery partner with no quoted
+    amount for the route was selected. That is now prevented up front by
+    extract_available_partners() / next_delivery_partner(available_partners),
+    so a booking still stuck here after 60s is a real, unexpected problem.
     """
     deadline = time.time() + timeout
     last_status = None
+    polls = 0
     while time.time() < deadline:
+        polls += 1
         last_status = api_client.booking_status_from_details(booking_id)
+        print(f"[poll {polls}] booking {booking_id} status={last_status!r}")
         if last_status in success_statuses or last_status in failure_statuses:
             return last_status
         time.sleep(interval)
     return last_status
+
+
+def pick_route_with_available_partner(
+    api_client,
+    booking_type: str,
+    sa_locations: list,
+    intl_locations: list,
+    saudi_side: str,
+    max_attempts: int = 6,
+):
+    """
+    Picks pickup/dropoff + weight/dimensions, quotes the REAL shipment via
+    get_delivery_and_rate, and chooses a delivery partner ONLY from partners
+    with a real quoted amount for that route (user-mandated rule,
+    2026-10-07). If the route has no usable partner, picks a different
+    location pair and tries again (the server's own advice: "Please try
+    again with another delivery partner or change the location") -- up to
+    max_attempts -- instead of blindly submitting a booking that gets
+    rejected or stuck on "Requested".
+
+    Returns dict: pickup, dropoff, weight_and_dimensions, delivery_rates,
+    available_partners, delivery_partner.
+    """
+    last_problem = "no attempt made"
+    for attempt in range(1, max_attempts + 1):
+        saudi_location = next_fresh_location(sa_locations, is_saudi=True)
+        assert (saudi_location.get("country_code") or "").upper() == "SA", (
+            f"next_fresh_location(is_saudi=True) returned a non-Saudi location: {saudi_location!r}"
+        )
+        intl_location = next_fresh_location(intl_locations, is_saudi=False)
+        assert (intl_location.get("country_code") or "").upper() != "SA", (
+            f"next_fresh_location(is_saudi=False) returned a Saudi location: {intl_location!r}"
+        )
+        pickup, dropoff = arrange_pickup_dropoff(saudi_location, intl_location, saudi_side=saudi_side)
+        assert_exactly_one_saudi_side(pickup, dropoff, context=f"route attempt {attempt} ({booking_type})")
+        step(
+            f"route attempt {attempt}",
+            pickup=f"{pickup.get('city')}, {pickup.get('country')}",
+            dropoff=f"{dropoff.get('city')}, {dropoff.get('country')}",
+        )
+
+        weight_and_dimensions = random_weight_and_dimensions(booking_type)
+        actual_weight, length, width, height = weight_and_dimensions
+        rate_payload = build_rate_payload(booking_type, pickup, dropoff, actual_weight, length, width, height)
+        delivery_rates = api_client.get_delivery_and_rate(rate_payload)
+        dump_debug(f"get_delivery_and_rate_{booking_type}_response", delivery_rates)
+
+        assert delivery_rates.get("status") == "success", (
+            f"get_delivery_and_rate did not return status 'success': {delivery_rates!r}"
+        )
+        quoted_days = sorted((delivery_rates.get("days") or {}).keys())
+        available = extract_available_partners(delivery_rates)
+        step("rates quoted", partners_in_days=quoted_days, partners_with_amount=available)
+
+        if not available:
+            last_problem = f"no partner has a quoted amount for {pickup.get('country')} -> {dropoff.get('country')}"
+            step("route rejected, trying another location pair", reason=last_problem)
+            continue
+
+        try:
+            delivery_partner = next_delivery_partner(available_partners=available)
+        except ValueError as exc:
+            last_problem = str(exc)
+            step("route rejected, trying another location pair", reason=last_problem)
+            continue
+
+        assert delivery_partner in available, (
+            f"picked partner {delivery_partner!r} is not among partners with a quoted amount {available}"
+        )
+        step("delivery_partner picked (has quoted amount)", delivery_partner=delivery_partner)
+        return {
+            "pickup": pickup,
+            "dropoff": dropoff,
+            "weight_and_dimensions": weight_and_dimensions,
+            "delivery_rates": delivery_rates,
+            "available_partners": available,
+            "delivery_partner": delivery_partner,
+        }
+
+    raise AssertionError(
+        f"Could not find a route with a bookable delivery partner after {max_attempts} attempts "
+        f"for {booking_type}. Last problem: {last_problem}"
+    )
 
 
 def assert_exactly_one_saudi_side(pickup: dict, dropoff: dict, context: str = ""):

@@ -131,14 +131,46 @@ def set_last_saudi_side(side: str):
     _save(state)
 
 
-def next_delivery_partner() -> str:
-    """Round-robins through DELIVERY_PARTNER_ROTATION (DHL excluded). Atomic (picks + records)."""
+def next_delivery_partner(available_partners: list = None) -> str:
+    """
+    Round-robins through DELIVERY_PARTNER_ROTATION, but ONLY among partners
+    that are actually bookable for this route.
+
+    RULE (user-mandated 2026-10-07): `available_partners` must be the
+    partners with a real quoted amount from get_delivery_and_rate (see
+    data/booking_payloads.py extract_available_partners). Picking a partner
+    without a quote is rejected by the server or leaves the booking stuck on
+    "Requested" forever. Rotation order is kept: starting from the saved
+    index, the first rotation entry that is available is used, and the index
+    moves just past it so the next booking tries the next partner.
+
+    Raises ValueError if none of the rotation partners is available for the
+    route -- the caller should pick a different location pair, not guess.
+    Atomic (picks + records).
+    """
     state = _load()
     idx = state.get("partner_rotation_index", 0) % len(DELIVERY_PARTNER_ROTATION)
-    partner = DELIVERY_PARTNER_ROTATION[idx]
-    state["partner_rotation_index"] = (idx + 1) % len(DELIVERY_PARTNER_ROTATION)
-    _save(state)
-    return partner
+
+    if available_partners is None:
+        raise ValueError(
+            "next_delivery_partner() now requires available_partners (the partners "
+            "with a quoted amount for this route) -- picking blindly caused rejected "
+            "and stuck 'Requested' bookings."
+        )
+
+    available = {p.lower() for p in available_partners}
+    for offset in range(len(DELIVERY_PARTNER_ROTATION)):
+        candidate_idx = (idx + offset) % len(DELIVERY_PARTNER_ROTATION)
+        candidate = DELIVERY_PARTNER_ROTATION[candidate_idx]
+        if candidate.lower() in available:
+            state["partner_rotation_index"] = (candidate_idx + 1) % len(DELIVERY_PARTNER_ROTATION)
+            _save(state)
+            return candidate
+
+    raise ValueError(
+        f"None of the rotation partners {DELIVERY_PARTNER_ROTATION} has a quote for this route "
+        f"(available with a quote: {sorted(available)})."
+    )
 
 
 def next_fresh_location(locations: list[dict], is_saudi: bool) -> dict:

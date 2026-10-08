@@ -821,3 +821,93 @@ watch-item rather than acted on now — if "please enter valid location"
 recurs on a NON-freight-partner booking, revisit this specific location's
 data quality (check Niger's postal_code attribute in a fresh
 `/bookings/booking_form` fetch).
+
+## 16. Session addendum (2026-10-07, final) — ROOT CAUSE of rejected / stuck bookings found and fixed
+
+**`get_delivery_and_rate` real response shape — CONFIRMED (long-standing open item, now closed):**
+```json
+{"status": "success",
+ "days":   {"dhl": "3 Days", "ups": "5 - 7 Days", "aramex": "5 - 7 Days", "fedex": "3 Days"},
+ "amount": {"ups":    {"payable_amount": 916.46, "vat_amount": 0, "base_amount": 916.46, "base_price": 916.46, "is_offer_applied": false, "offer_details": {}},
+            "aramex": {"payable_amount": 1803.45, ...}},
+ "offer_details": ""}
+```
+`days` lists every partner the route theoretically supports; `amount` lists
+only the partners with a REAL price. **A partner is bookable only if it is
+in `amount`.** Evidence from real runs: Saudi→Ukraine parcel quoted days for
+dhl/ups/aramex/fedex but amount only for ups/aramex; we picked `fedex` and
+the server answered `booking.please_select_delivery_partners` ("Please try
+again with another delivery partner or change the location"). Afghanistan→
+Saudi pallet had `dhl` in days but not amount; we picked `dhl`, the booking
+was created with `ppd_amount: null`, `goods_value: null`, an empty
+`tabby_payments`, and sat on status "Requested" forever (and never appears
+in the application).
+
+**This supersedes the earlier theories** (FedEx phone-digit cap, "freight"
+variants being invalid, per-country phone lengths causing the instability):
+the instability was blind partner selection. Freight variants were not
+inherently invalid — they simply had no quote on those routes.
+
+**RULE (user-mandated, treat as permanent): only select a delivery partner
+that has a quoted amount for that specific route.** Implemented:
+- `extract_available_partners()` (data/booking_payloads.py): partner must be
+  in `amount` with `payable_amount > 0`. (Decision to flag: aramex showed
+  `payable_amount: 0` on one pallet route and is treated as NOT available —
+  a booking with no price is exactly what gets stuck. If the user says a 0
+  quote is valid, relax to "key present".)
+- `next_delivery_partner(available_partners)` (data/diversity_tracker.py):
+  now REQUIRES the available list; keeps round-robin order but skips
+  unavailable partners; raises ValueError if none usable.
+- `pick_route_with_available_partner()` (booking_test_helpers.py): picks the
+  route, quotes it, selects the partner; if the route has no usable partner
+  it picks a DIFFERENT location pair and retries (6 attempts), then fails
+  with a clear message. Both tests use it.
+- Defensive assertions: chosen partner is in the available list; its
+  `delivery_rate_<partner>` field is > 0; after `/bookings/add`,
+  `payment_array[0].ppd_amount` must be a positive number — if it is null
+  the test fails BEFORE paying, instead of paying for a stuck booking.
+
+**Other bugs found while reading the real response, fixed:**
+1. Rates were never actually submitted: the old code looked for flat
+   `delivery_rate_*` keys in the response that never existed, so every
+   booking silently sent blank rates. Now mapped from
+   `amount[<partner>].payable_amount` into `delivery_rate_<partner>`.
+2. The rate quote always used a fixed 10 kg / 15x12x11 parcel, even for
+   Pallet. Availability depends on weight/size, so it was being checked
+   against the wrong shipment. Weight/dimensions are now chosen FIRST and
+   the quote uses them (`build_rate_payload()`); the same tuple is passed
+   to the builder (`weight_and_dimensions=`) so quote and booking match.
+3. Volumetric weight = L*W*H/5000 rounded UP to the nearest 0.5 (verified
+   against server values: 100x100x14→28, 120x100x15→36, 15x12x11→0.5);
+   `higher_weight = max(actual, volumetric)`.
+
+**Status polling:** `wait_for_terminal_status()` now waits up to 60s
+(interval 3s), re-fetching the booking details on every poll (equivalent to
+refreshing the page) and printing each poll. "Requested" is not terminal; a
+booking still on it after 60s is a real problem now that stuck-by-design
+bookings are prevented up front.
+
+**Timeouts:** `/bookings/add` and `/bookings/make_ppd_payment` now use a 90s
+Playwright timeout (a pallet `add` hit the 30s default once, 2026-10-07,
+route Argentina→Saudi, partner fedex_priority; cause unconfirmed — may be the
+same unavailable-partner problem, since a stuck carrier lookup is plausible).
+If it still times out with an available partner, investigate separately.
+
+**Debug dump filenames changed:** rate responses are now
+`.auth/debug_get_delivery_and_rate_parcel_response.json` and
+`.auth/debug_get_delivery_and_rate_pallet_response.json` (one per booking
+type, written on every route attempt).
+
+**Notes / open items:**
+- Partners seen with real quotes so far: ups, aramex, fedex, fedex_priority,
+  fedex_connect_plus. `dhl` has appeared only in `days` so far, so it will
+  rarely be chosen until a route actually quotes it — expected, not a bug.
+- The "freight" FedEx variants (removed from rotation in §15) are now safe to
+  re-add because availability gating protects against them; left out until
+  the user asks, since no route has quoted them yet.
+- Diversity cooldown state is consumed on each route attempt, including
+  rejected ones — harmless, but the Saudi/intl location cooldown lists will
+  advance faster when retries happen.
+- Still unresolved: the earlier Niger-pickup case with an empty
+  `pickup_postal_code` (§15) — revisit only if "please enter valid location"
+  recurs with a partner that HAS a quote.
