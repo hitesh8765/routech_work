@@ -35,6 +35,43 @@ Field-name mapping confirmed by live capture of POST /bookings/add:
         live recon showed the actual UI does this too, e.g. "+61" for an
         Australia pickup, not a fixed Saudi default)
 """
+"""
+Test-data pools and payload builders, encoding the business rules given
+during the walkthrough:
+
+  - For every booking, exactly one of {pickup, dropoff} must be a Saudi
+    Arabia location; the other must be non-Saudi. Which side is Saudi
+    strictly alternates booking to booking, globally, across all booking
+    types -- see data/diversity_tracker.py.
+  - Insurance: always "No".
+  - Shipment Invoice: always "Create Invoice" (never "Upload Invoice").
+  - Item Name: random from ITEM_NAME_POOL.
+  - Item Quantity: random from ITEM_QUANTITY_POOL.
+  - HS Code: looked up using the SAME string as the item name (the site's
+    autocomplete is then used to pick a real code -- see
+    RoutechAPIClient.get_hs_codes).
+  - Item Price: random from ITEM_PRICE_POOL.
+  - Actual Weight: random int in [8, 16].
+  - Length > Width > Height, chosen as one whole combo from
+    DIMENSION_COMBO_POOL (never assembled from independently-random parts,
+    to preserve the length > width > height ordering rule).
+  - Receiver Mobile Number AND Sender Mobile Number: digit count must
+    match the ACTUAL country they belong to (receiver -> dropoff country,
+    sender -> pickup country), confirmed by the user (2026-09-22) and
+    extended to cover the sender too in a later clarification -- see
+    data/phone_formats.py. Was previously a fixed/flexible-length scheme;
+    superseded.
+
+Field-name mapping confirmed by live capture of POST /bookings/add:
+    stakeholder_name        -> Receiver Name
+    country_code            -> Receiver's phone country code (now dynamic, matches dropoff country)
+    stakeholders             -> Receiver Mobile Number (now dynamic length, matches dropoff country)
+    sender_name / sender_country_code / sender_mobile_number -> Sender
+        (sender_name stays fixed -- real account holder name; sender
+        phone/country code now dynamic, matches PICKUP country -- real
+        live recon showed the actual UI does this too, e.g. "+61" for an
+        Australia pickup, not a fixed Saudi default)
+"""
 import random
 from typing import Literal
 
@@ -97,7 +134,6 @@ DELIVERY_PARTNER_RATE_FIELDS = [
     "delivery_rate_dhl_express_domestic", "delivery_rate_darb",
 ]
 
-
 def extract_available_partners(delivery_rates: dict) -> list:
     """
     RULE (user-mandated 2026-10-07, backed by real response data): only
@@ -123,7 +159,6 @@ def extract_available_partners(delivery_rates: dict) -> list:
             available.append(partner)
     return available
 
-
 def volumetric_weight(length: int, width: int, height: int) -> float:
     """
     Dimensional weight as the app computes it: L*W*H / 5000, rounded UP to
@@ -132,7 +167,6 @@ def volumetric_weight(length: int, width: int, height: int) -> float:
     """
     import math
     return math.ceil((length * width * height / 5000) * 2) / 2
-
 
 def build_rate_payload(
     booking_type: str,
@@ -151,6 +185,10 @@ def build_rate_payload(
     """
     dimension_weight = volumetric_weight(length, width, height)
     higher_weight = max(actual_weight, dimension_weight)
+    
+    # FIX: Set is_palletized to "true" for Pallet bookings
+    is_palletized = "true" if booking_type == "pallet" else "false"
+    
     return {
         "type": "b2c",
         "pickup_city": pickup.get("city", ""),
@@ -176,9 +214,8 @@ def build_rate_payload(
         "package_dimension[0][higher_weight]": str(higher_weight),
         "offer_code": "",
         "booking_type": booking_type,
-        "is_palletized": "false",
+        "is_palletized": is_palletized,
     }
-
 
 def random_weight_and_dimensions(booking_type: str = "parcel") -> tuple:
     """
@@ -200,7 +237,6 @@ def random_weight_and_dimensions(booking_type: str = "parcel") -> tuple:
     length, width, height = random.choice(DIMENSION_COMBO_POOL)
     return actual_weight, length, width, height
 
-
 def random_mobile_for_country(iso_country_code: str) -> tuple:
     """
     Returns (dial_code, local_number) matching the given country's real
@@ -213,14 +249,12 @@ def random_mobile_for_country(iso_country_code: str) -> tuple:
     digits = [str(random.randint(1, 9))] + [str(random.randint(0, 9)) for _ in range(fmt.digits - 1)]
     return fmt.dial_code, "".join(digits)
 
-
 def random_item() -> dict:
     return {
         "item_name": random.choice(ITEM_NAME_POOL),
         "item_quantity": str(random.choice(ITEM_QUANTITY_POOL)),
         "item_price": str(random.choice(ITEM_PRICE_POOL)),
     }
-
 
 def arrange_pickup_dropoff(saudi_location: dict, intl_location: dict, saudi_side: Literal["pickup", "dropoff"]):
     """
@@ -234,7 +268,6 @@ def arrange_pickup_dropoff(saudi_location: dict, intl_location: dict, saudi_side
     if saudi_side == "pickup":
         return saudi_location, intl_location  # pickup, dropoff
     return intl_location, saudi_location
-
 
 def build_booking_detail(
     booking_type: str,
@@ -255,7 +288,7 @@ def build_booking_detail(
     despite the name -- included here only for booking_type=="parcel" to
     preserve exact fidelity per type without risking anything that already
     works). `pickup_location` / `dropoff_location` are dicts as returned by
-    utils.html_parsing.parse_pickup_locations() (or an equivalent shape for
+    utils/html_parsing.parse_pickup_locations() (or an equivalent shape for
     a freshly-geocoded international address).
 
     `delivery_rates` should be the dict returned by
@@ -279,6 +312,9 @@ def build_booking_detail(
     # country -- see data/phone_formats.py.
     receiver_dial_code, receiver_mobile = random_mobile_for_country(dropoff_location.get("country_code", ""))
     sender_dial_code, sender_mobile = random_mobile_for_country(pickup_location.get("country_code", ""))
+
+    # FIX: Set is_palletized to "true" for Pallet bookings
+    is_palletized = "true" if booking_type == "pallet" else "false"
 
     detail = {
         # -- pickup --
@@ -354,7 +390,7 @@ def build_booking_detail(
             }
         ],
         "offer_code": "",
-        "is_palletized": "false",
+        "is_palletized": is_palletized,
         "delivery_partners": delivery_partner,
     }
 
@@ -373,10 +409,8 @@ def build_booking_detail(
 
     return detail
 
-
 def build_parcel_booking_detail(**kwargs) -> dict:
     return build_booking_detail(booking_type="parcel", **kwargs)
-
 
 def build_pallet_booking_detail(**kwargs) -> dict:
     """
