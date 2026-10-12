@@ -911,3 +911,100 @@ type, written on every route attempt).
 - Still unresolved: the earlier Niger-pickup case with an empty
   `pickup_postal_code` (§15) — revisit only if "please enter valid location"
   recurs with a partner that HAS a quote.
+
+## 17. Session addendum (2026-10-09) — review of the user's commit `9f820a1`, retry made visible
+
+**What the user changed (3 files: `data/booking_payloads.py`, both tests) and
+the verdict:**
+- ✅ **`is_palletized = "true"` for Pallet bookings (rate quote AND booking
+  payload) — CORRECT, confirmed by results.** Before it, UPS priced pallets
+  at `ppd_amount: 0` at `/bookings/add` even though `get_delivery_and_rate`
+  quoted it (Germany→Saudi, UPS, 5821.76 quoted / 0 at add). After it, UPS
+  pallets reached "Shipment Submitted" five times (Germany→Saudi ×2,
+  US/India/China→Saudi). A pallet must be flagged palletized to be priced as
+  a pallet. **This corrects the earlier note (§ "Pallet booking type") that
+  Pallet's payload is identical to Parcel's except `booking_type`.**
+  Parcel stays `"false"`. `create_priced_booking()` now asserts it.
+- ✅ **Retry when the server returns a booking priced at 0** — kept (an
+  unpriced booking must never be paid for).
+- ❌ Problems found in the version as committed, and the fixes:
+  1. `except Exception: continue` swallowed EVERY error (field validation,
+     phone digits, address errors) and only reported a generic message after
+     3 tries. Now only known partner/location rejections and price-0 are
+     retried (`retryable_create_failure()`); anything else raises at once
+     with its real message.
+  2. Skipped partners left no trace, so the suite quietly rotated past every
+     partner that failed. Observed in `reports/`: all recent Parcels = Aramex,
+     all recent Pallets = UPS, `partner_rotation_index` stuck at 2 — FedEx,
+     DHL, Darb were effectively never exercised, defeating the goal of
+     verifying every partner. Every skipped attempt now writes a
+     `SKIPPED: <reason>` row (partner + route) to the Excel report, and any
+     failure after the booking exists writes `FAILED: <reason>`.
+  3. `"Requested"` had been added to `failure_statuses`, which ends the poll
+     on the first check and defeats the 60-second wait the user asked for.
+     Reverted: `"Requested"` is NOT terminal; the poll runs up to 60s.
+  4. The Parcel assertions (weight 8–16, length>width>height) had been
+     dropped — restored (inside `check_package`).
+  5. Module docstring pasted twice in `booking_payloads.py` and both tests
+     (a stray second string literal); removed. Blank lines between defs and
+     the trailing newline restored.
+- Retry/skip logic now lives in ONE place, `create_priced_booking()` in
+  `tests/api/bookings/booking_test_helpers.py`, and both tests are thin
+  wrappers around it (generated from the same template) so they can't drift.
+  Every attempt, including skipped ones, creates an unpaid server-side
+  booking record (invisible in the app).
+
+**Other fixes this session:**
+- **HS code vs item name mismatch (existed since the first build, violated
+  the user's rule "HS code = same as the item name"):** the HS code was
+  looked up for item A, then the builder re-randomized the item name to B,
+  so e.g. "books" was sent with the HS code of "keyboard". The builder now
+  takes `item_name=`; `create_priced_booking()` passes the looked-up name and
+  asserts it.
+- **Bad saved-location data:** a saved Mauritius location had
+  `latitude "0"` / `longitude "0"`; `/bookings/add` answered
+  `Missing parameters.` on `dropoff_address` while using Aramex (the most
+  reliable partner) — i.e. bad account data, not a partner problem.
+  `usable_locations()` (uses `is_usable_location()` in
+  `utils/html_parsing.py`) now drops locations with no city/country code or
+  zero/missing coordinates before anything is picked. Empty postal codes are
+  NOT filtered (an empty-postal Kabul pickup booked fine).
+- **Location blacklist:** if `/bookings/add` rejects an address
+  (`Missing parameters.` / `Please enter valid location.`), the offending
+  location id goes into `reports/diversity_state.json` →
+  `bad_location_ids` (`mark_location_bad()`); `next_fresh_location()` never
+  picks it again. Delete the entry by hand to re-enable one.
+
+**Opt-in partner probe — `tests/api/bookings/test_90_partner_probe.py`:**
+`pytest -s -m probe` (excluded from the normal run by
+`addopts = ... -m "not probe"` in `pytest.ini`; `pytest -m parcel` etc. still
+work because a later `-m` overrides). For each (parcel/pallet) × (Saudi
+pickup/dropoff) it quotes one route, then calls `/bookings/add` once per
+partner that has a quote — payload identical except `delivery_partners` — and
+records PRICED / NO PRICE / REJECTED in `reports/partner_probe.csv`. It never
+pays and never touches the Saudi-side or partner rotation state. Side effect:
+~25 unpaid booking records per full run.
+
+**Findings / open items for the user:**
+- *History is confounded:* because exactly two tests run per session and the
+  Saudi side flips once per booking, Parcel always lands on Saudi-pickup and
+  Pallet on Saudi-dropoff (parity lock). Report data therefore can't separate
+  "booking type" from "direction". Adding a third booking test (Luggage) breaks
+  the lock; the probe tests all four combinations explicitly.
+- *FedEx on Parcel (Saudi pickup) was 0/5 ("Requested") before this session;
+  FedEx on Pallet (Saudi dropoff) was 3/3.* Not yet re-tested after
+  `is_palletized`; unknown whether it's a partner/type issue or an app defect.
+  The SKIPPED rows + the probe will show it.
+- *DHL is effectively never used:* `DELIVERY_PARTNER_ROTATION` contains plain
+  `"dhl"`, but the priced `amount` entries are named `dhl_express_worldwide`
+  and `dhl_express_easy` (plain `"dhl"` only ever appears in `days`). To use
+  DHL those names must be added to the rotation — NEEDS THE USER'S DECISION
+  (the earlier instruction treated all `dhl_*` variants as one family).
+- *FedEx freight variants* (`fedex_priority_freight`,
+  `fedex_economy_freight`) DO appear priced for pallet routes; they are
+  excluded from the rotation (§15) and could now be re-added safely, since the
+  availability + price-0 handling protects against them. Also the user's call.
+- Not yet run live by the assistant (sandbox can't reach the site): the
+  retry/skip/blacklist/probe logic was verified offline with a fake client
+  against the real response shapes (success, price-0, partner rejection, bad
+  address, real validation error, payment failure, "Requested" polling).

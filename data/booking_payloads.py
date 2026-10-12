@@ -35,43 +35,6 @@ Field-name mapping confirmed by live capture of POST /bookings/add:
         live recon showed the actual UI does this too, e.g. "+61" for an
         Australia pickup, not a fixed Saudi default)
 """
-"""
-Test-data pools and payload builders, encoding the business rules given
-during the walkthrough:
-
-  - For every booking, exactly one of {pickup, dropoff} must be a Saudi
-    Arabia location; the other must be non-Saudi. Which side is Saudi
-    strictly alternates booking to booking, globally, across all booking
-    types -- see data/diversity_tracker.py.
-  - Insurance: always "No".
-  - Shipment Invoice: always "Create Invoice" (never "Upload Invoice").
-  - Item Name: random from ITEM_NAME_POOL.
-  - Item Quantity: random from ITEM_QUANTITY_POOL.
-  - HS Code: looked up using the SAME string as the item name (the site's
-    autocomplete is then used to pick a real code -- see
-    RoutechAPIClient.get_hs_codes).
-  - Item Price: random from ITEM_PRICE_POOL.
-  - Actual Weight: random int in [8, 16].
-  - Length > Width > Height, chosen as one whole combo from
-    DIMENSION_COMBO_POOL (never assembled from independently-random parts,
-    to preserve the length > width > height ordering rule).
-  - Receiver Mobile Number AND Sender Mobile Number: digit count must
-    match the ACTUAL country they belong to (receiver -> dropoff country,
-    sender -> pickup country), confirmed by the user (2026-09-22) and
-    extended to cover the sender too in a later clarification -- see
-    data/phone_formats.py. Was previously a fixed/flexible-length scheme;
-    superseded.
-
-Field-name mapping confirmed by live capture of POST /bookings/add:
-    stakeholder_name        -> Receiver Name
-    country_code            -> Receiver's phone country code (now dynamic, matches dropoff country)
-    stakeholders             -> Receiver Mobile Number (now dynamic length, matches dropoff country)
-    sender_name / sender_country_code / sender_mobile_number -> Sender
-        (sender_name stays fixed -- real account holder name; sender
-        phone/country code now dynamic, matches PICKUP country -- real
-        live recon showed the actual UI does this too, e.g. "+61" for an
-        Australia pickup, not a fixed Saudi default)
-"""
 import random
 from typing import Literal
 
@@ -134,6 +97,7 @@ DELIVERY_PARTNER_RATE_FIELDS = [
     "delivery_rate_dhl_express_domestic", "delivery_rate_darb",
 ]
 
+
 def extract_available_partners(delivery_rates: dict) -> list:
     """
     RULE (user-mandated 2026-10-07, backed by real response data): only
@@ -159,6 +123,7 @@ def extract_available_partners(delivery_rates: dict) -> list:
             available.append(partner)
     return available
 
+
 def volumetric_weight(length: int, width: int, height: int) -> float:
     """
     Dimensional weight as the app computes it: L*W*H / 5000, rounded UP to
@@ -167,6 +132,7 @@ def volumetric_weight(length: int, width: int, height: int) -> float:
     """
     import math
     return math.ceil((length * width * height / 5000) * 2) / 2
+
 
 def build_rate_payload(
     booking_type: str,
@@ -217,6 +183,7 @@ def build_rate_payload(
         "is_palletized": is_palletized,
     }
 
+
 def random_weight_and_dimensions(booking_type: str = "parcel") -> tuple:
     """
     Returns (actual_weight, length, width, height) as ONE combo.
@@ -237,6 +204,7 @@ def random_weight_and_dimensions(booking_type: str = "parcel") -> tuple:
     length, width, height = random.choice(DIMENSION_COMBO_POOL)
     return actual_weight, length, width, height
 
+
 def random_mobile_for_country(iso_country_code: str) -> tuple:
     """
     Returns (dial_code, local_number) matching the given country's real
@@ -249,12 +217,14 @@ def random_mobile_for_country(iso_country_code: str) -> tuple:
     digits = [str(random.randint(1, 9))] + [str(random.randint(0, 9)) for _ in range(fmt.digits - 1)]
     return fmt.dial_code, "".join(digits)
 
+
 def random_item() -> dict:
     return {
         "item_name": random.choice(ITEM_NAME_POOL),
         "item_quantity": str(random.choice(ITEM_QUANTITY_POOL)),
         "item_price": str(random.choice(ITEM_PRICE_POOL)),
     }
+
 
 def arrange_pickup_dropoff(saudi_location: dict, intl_location: dict, saudi_side: Literal["pickup", "dropoff"]):
     """
@@ -269,6 +239,7 @@ def arrange_pickup_dropoff(saudi_location: dict, intl_location: dict, saudi_side
         return saudi_location, intl_location  # pickup, dropoff
     return intl_location, saudi_location
 
+
 def build_booking_detail(
     booking_type: str,
     pickup_location: dict,
@@ -279,6 +250,7 @@ def build_booking_detail(
     delivery_partner: str = "ups",
     sender_name: str = "Neeraj Sharma",
     weight_and_dimensions: tuple = None,
+    item_name: str = None,
 ) -> dict:
     """
     Builds the exact `booking_detail[0]` dict shape captured live for both
@@ -303,6 +275,12 @@ def build_booking_detail(
     holder's name, confirmed via live capture).
     """
     item = random_item()
+    # RULE (user): the HS code must be the one looked up for THIS item name.
+    # Until 2026-10-09 the item name here was re-randomized after the HS
+    # lookup, so e.g. item "books" was sent with the HS code of "keyboard".
+    # Callers now pass the same item_name they used for get_hs_codes().
+    if item_name:
+        item["item_name"] = item_name
     # Weight/dimensions are normally chosen by the caller BEFORE quoting
     # rates (so availability is checked for the real shipment) and passed in.
     actual_weight, length, width, height = weight_and_dimensions or random_weight_and_dimensions(booking_type)
@@ -409,8 +387,10 @@ def build_booking_detail(
 
     return detail
 
+
 def build_parcel_booking_detail(**kwargs) -> dict:
     return build_booking_detail(booking_type="parcel", **kwargs)
+
 
 def build_pallet_booking_detail(**kwargs) -> dict:
     """

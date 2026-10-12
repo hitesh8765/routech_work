@@ -90,6 +90,7 @@ _DEFAULT_STATE = {
     "used_intl_location_ids": [],
     "last_saudi_side": "pickup",
     "partner_rotation_index": 2,
+    "bad_location_ids": {},
 }
 
 
@@ -173,15 +174,40 @@ def next_delivery_partner(available_partners: list = None) -> str:
     )
 
 
+def mark_location_bad(location_id: str, reason: str):
+    """
+    Permanently excludes a saved location whose data the server rejected
+    (e.g. "Missing parameters" / "Please enter valid location" on its
+    address). Persisted in reports/diversity_state.json under
+    "bad_location_ids" -> {id: reason}; delete the entry by hand to
+    re-enable a location after fixing its data in the app.
+    """
+    if not location_id:
+        return
+    state = _load()
+    bad = state.setdefault("bad_location_ids", {})
+    bad[location_id] = reason
+    _save(state)
+
+
+def get_bad_location_ids() -> dict:
+    return dict(_load().get("bad_location_ids", {}))
+
+
 def next_fresh_location(locations: list[dict], is_saudi: bool) -> dict:
     """
     Picks a location whose id hasn't been used within the relevant cooldown
-    window (Saudi: ~7 other locations since; non-Saudi: ~17). Falls back to
-    picking from the full pool if every available location is still within
-    cooldown (e.g. the account doesn't have enough distinct saved locations
-    yet to satisfy the full cooldown). Atomic (picks + records).
+    window (Saudi: ~7 other locations since; non-Saudi: ~17), never picking
+    one blacklisted via mark_location_bad(). Falls back to the full
+    (non-blacklisted) pool if every location is still within cooldown.
+    Atomic (picks + records).
     """
     state = _load()
+    bad = state.get("bad_location_ids", {})
+    locations = [loc for loc in locations if loc.get("id") not in bad]
+    if not locations:
+        raise ValueError("No usable locations left (all are blacklisted via mark_location_bad).")
+
     key = "used_saudi_location_ids" if is_saudi else "used_intl_location_ids"
     cooldown = SAUDI_LOCATION_COOLDOWN if is_saudi else INTL_LOCATION_COOLDOWN
     used_list = state.get(key, [])

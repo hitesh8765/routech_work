@@ -4,16 +4,23 @@ test_02_pallet_booking.py, ...). Extracted here once Pallet needed the same
 logic Parcel already had, rather than duplicating per file.
 """
 import json
+import random
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from data.booking_payloads import (
+    ITEM_NAME_POOL,
+    RECEIVER_NAME_POOL,
     arrange_pickup_dropoff,
+    build_booking_detail,
     build_rate_payload,
     extract_available_partners,
     random_weight_and_dimensions,
 )
-from data.diversity_tracker import next_delivery_partner, next_fresh_location
+from data.diversity_tracker import mark_location_bad, next_delivery_partner, next_fresh_location
+from reporting.excel_report import booking_type_label, delivery_partner_label, route_label
+from utils.html_parsing import is_usable_location
 
 DEBUG_DIR = Path(__file__).resolve().parent.parent.parent.parent / ".auth"
 DEBUG_DIR.mkdir(exist_ok=True)
@@ -157,6 +164,7 @@ def pick_route_with_available_partner(
     intl_locations: list,
     saudi_side: str,
     max_attempts: int = 6,
+    choose_partner: bool = True,
 ):
     """
     Picks pickup/dropoff + weight/dimensions, quotes the REAL shipment via
@@ -207,6 +215,18 @@ def pick_route_with_available_partner(
             step("route rejected, trying another location pair", reason=last_problem)
             continue
 
+        if not choose_partner:
+            # Probe mode: caller wants the route + every bookable partner and
+            # will try them all itself (see probe_partners()).
+            return {
+                "pickup": pickup,
+                "dropoff": dropoff,
+                "weight_and_dimensions": weight_and_dimensions,
+                "delivery_rates": delivery_rates,
+                "available_partners": available,
+                "delivery_partner": None,
+            }
+
         try:
             delivery_partner = next_delivery_partner(available_partners=available)
         except ValueError as exc:
@@ -252,4 +272,326 @@ def assert_exactly_one_saudi_side(pickup: dict, dropoff: dict, context: str = ""
         f"{context}: expected exactly ONE of pickup/dropoff to be Saudi Arabia, got "
         f"pickup country_code={pickup.get('country_code')!r} (id={pickup.get('id')!r}), "
         f"dropoff country_code={dropoff.get('country_code')!r} (id={dropoff.get('id')!r})"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Added 2026-10-08
+# ---------------------------------------------------------------------------
+def usable_locations(locations: list) -> list:
+    """
+    Drops saved locations with bad data (missing city/country code, or
+    latitude/longitude missing or 0) BEFORE any is picked, and prints what
+    was dropped. Evidence: a saved Mauritius location with lat/lng "0"
+    made /bookings/add reject the booking ("Missing parameters." on
+    dropoff_address) even with a healthy partner (aramex).
+    """
+    good = [loc for loc in locations if is_usable_location(loc)]
+    dropped = [loc for loc in locations if not is_usable_location(loc)]
+    if dropped:
+        step(
+            "ignored saved locations with bad data",
+            count=len(dropped),
+            examples=[f"{d.get('city')}, {d.get('country')} (id={d.get('id')})" for d in dropped[:3]],
+        )
+    return good
+
+
+# Server messages that mean "this location's data is bad" (as opposed to a
+# partner/price problem).
+_LOCATION_ERROR_MESSAGES = ("Missing parameters.", "Please enter valid location.")
+
+
+def blacklist_bad_locations_from_error(response: dict, pickup: dict, dropoff: dict):
+    """
+    If /bookings/add rejected a booking because of an address, remember the
+    offending saved location (diversity_state.json -> bad_location_ids) so
+    later runs never pick it again. Does NOT hide the failure -- the caller
+    still raises; the point is that the SAME bad record can't fail every
+    future run. Only acts on the exact messages in _LOCATION_ERROR_MESSAGES.
+    """
+    if not isinstance(response, dict) or response.get("status") != "error":
+        return
+    for m in response.get("message", []) or []:
+        if not isinstance(m, dict) or m.get("msg") not in _LOCATION_ERROR_MESSAGES:
+            continue
+        param = m.get("param", "")
+        for side_name, loc in (("pickup_address", pickup), ("dropoff_address", dropoff)):
+            if side_name in param:
+                reason = f"{m.get('msg')} ({param})"
+                mark_location_bad(loc.get("id"), reason)
+                step(
+                    "location blacklisted (will not be picked again)",
+                    id=loc.get("id"),
+                    city=loc.get("city"),
+                    country=loc.get("country"),
+                    reason=reason,
+                )
+
+
+@contextmanager
+def log_failure_to_report(booking_report, booking_type: str, type_partner: str, pickup: dict, dropoff: dict, delivery_partner: str):
+    """
+    Until now a booking that failed before completing left NO row in the
+    Excel report, so the combinations that fail (the whole point of this
+    suite) were invisible there. Wrap the create/pay/poll steps in this: on
+    any exception it adds a "FAILED: <reason>" row, then re-raises so the
+    test still fails normally. Do NOT add the success row inside the same
+    block after something that can fail -- put it last, nothing after it.
+    """
+    try:
+        yield
+    except Exception as exc:  # noqa: BLE001 - re-raised below
+        text = str(exc).strip().splitlines()[0] if str(exc).strip() else exc.__class__.__name__
+        booking_report.add_row(
+            booking_type=booking_type_label(booking_type=booking_type, type_partner=type_partner),
+            booking_number="-",
+            route=route_label(pickup.get("country", ""), dropoff.get("country", "")),
+            delivery_partner=delivery_partner_label(delivery_partner),
+            status=f"FAILED: {text[:110]}",
+        )
+        raise
+
+
+def probe_partners(api_client, booking_type: str, saudi_side: str, sa_locations: list, intl_locations: list) -> list:
+    """
+    Settles "which partner works for which booking type + direction" with
+    data instead of guesses. Quotes ONE route, then calls /bookings/add once
+    per partner that has a quote -- identical payload apart from
+    delivery_partners -- and records whether the server priced it
+    (ppd_amount > 0), priced it at 0/null, or rejected it. NEVER pays.
+    Side effect: each add creates an unpaid server-side booking record.
+    """
+    route = pick_route_with_available_partner(
+        api_client, booking_type, sa_locations, intl_locations, saudi_side, choose_partner=False
+    )
+    pickup, dropoff = route["pickup"], route["dropoff"]
+    item_name = random.choice(ITEM_NAME_POOL)
+    hs_code = first_hs_code(api_client.get_hs_codes(item_name))
+    receiver_name = random.choice(RECEIVER_NAME_POOL)
+    results = []
+    for partner in route["available_partners"]:
+        detail = build_booking_detail(
+            booking_type=booking_type,
+            pickup_location=pickup,
+            dropoff_location=dropoff,
+            receiver_name=receiver_name,
+            hs_code=hs_code,
+            delivery_rates=route["delivery_rates"],
+            delivery_partner=partner,
+            weight_and_dimensions=route["weight_and_dimensions"],
+            item_name=item_name,
+        )
+        quoted = detail.get(f"delivery_rate_{partner}")
+        try:
+            response = api_client.create_booking(detail)
+        except Exception as exc:  # noqa: BLE001 - e.g. request timeout
+            outcome, ppd = f"EXCEPTION: {str(exc).splitlines()[0][:80]}", None
+        else:
+            if isinstance(response, dict) and response.get("status") == "error" and (
+                "message" in response or "req_data" in response
+            ):
+                msgs = "; ".join(
+                    f"{m.get('param', '?')}: {m.get('msg')}" for m in (response.get("message") or []) if isinstance(m, dict)
+                )
+                outcome, ppd = f"REJECTED: {msgs[:100]}", None
+            else:
+                pay = (response.get("payment_array") or [{}])[0]
+                ppd = pay.get("ppd_amount")
+                outcome = "PRICED" if isinstance(ppd, (int, float)) and ppd > 0 else f"NO PRICE (ppd_amount={ppd!r})"
+        results.append(
+            {
+                "type": booking_type,
+                "direction": "outbound (pickup=Saudi)" if saudi_side == "pickup" else "inbound (dropoff=Saudi)",
+                "route": route_label(pickup.get("country", ""), dropoff.get("country", "")),
+                "partner": partner,
+                "quoted_amount": quoted,
+                "add_ppd_amount": ppd,
+                "outcome": outcome,
+                "sender_phone_digits": len(detail["sender_mobile_number"]),
+                "receiver_phone_digits": len(detail["stakeholders"]),
+                "weight_dims": route["weight_and_dimensions"],
+            }
+        )
+        step("probe", partner=partner, quoted=quoted, outcome=outcome)
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Retry-with-visibility (2026-10-09) -- replaces the tests' inline retry loops
+# ---------------------------------------------------------------------------
+# Server keys that mean "this PARTNER or LOCATION does not work for this
+# route" (the server itself says "try again with another delivery partner or
+# change the location"). Everything else is a real error and must raise.
+_RETRYABLE_ERROR_KEYS = {
+    "booking.please_select_delivery_partners",
+    "system.please_enter_valid_location",
+}
+
+
+def retryable_create_failure(response: dict):
+    """
+    Returns a short reason string when this /bookings/add outcome is a known
+    "partner/route doesn't work" case that should be skipped and retried with
+    another partner/location, or None when it should NOT be retried:
+      * error response whose messages are ALL partner/location messages
+      * success-shaped response priced at 0/null (ppd_amount) -- the server
+        created the booking but couldn't price it; paying would leave it
+        stuck on "Requested" forever
+    Any other error (field validation, phone digits, etc.) returns None so
+    the caller raises it WITH its real message -- it is never swallowed.
+    """
+    if not isinstance(response, dict):
+        return None
+    if response.get("status") == "error" and ("message" in response or "req_data" in response):
+        msgs = [m for m in (response.get("message") or []) if isinstance(m, dict)]
+        if msgs and all(
+            m.get("key") in _RETRYABLE_ERROR_KEYS
+            or (
+                m.get("msg") in _LOCATION_ERROR_MESSAGES
+                and ("pickup_address" in m.get("param", "") or "dropoff_address" in m.get("param", ""))
+            )
+            for m in msgs
+        ):
+            return "; ".join(f"{m.get('param', '?')}: {m.get('msg')}" for m in msgs)[:150]
+        return None
+    if not response.get("payment_array"):
+        return None  # malformed success response: caller asserts on it
+    ppd = response["payment_array"][0].get("ppd_amount")
+    if not (isinstance(ppd, (int, float)) and ppd > 0):
+        return f"no price at add (ppd_amount={ppd!r})"
+    return None
+
+
+def create_priced_booking(
+    api_client,
+    booking_report,
+    booking_type: str,
+    sa_locations: list,
+    intl_locations: list,
+    saudi_side: str,
+    check_package,
+    max_attempts: int = 3,
+) -> dict:
+    """
+    Picks a route + partner (only partners with a quoted amount), builds the
+    booking and calls /bookings/add until the server returns a PRICED
+    booking, for up to max_attempts attempts.
+
+    Why a retry at all: some partner/route combinations are quoted by
+    get_delivery_and_rate but then priced at 0 (or rejected) by
+    /bookings/add. An unpriced booking must never be paid for.
+
+    What keeps this honest (the first inline version hid failures):
+      * ONLY retryable_create_failure() cases are retried; every other
+        error raises immediately with its real message.
+      * Every skipped attempt is written to the Excel report as a
+        "SKIPPED: <reason>" row (partner + route included), so a partner
+        that keeps failing is visible instead of silently rotated past.
+      * Each skipped attempt also blacklists a rejected location
+        (blacklist_bad_locations_from_error).
+      * After max_attempts the test FAILS and lists every skipped attempt.
+    Note: every attempt creates an unpaid server-side booking record.
+
+    `check_package(actual_weight, length, width, height)` is the booking
+    type's own dimension/weight rule; it must assert.
+    """
+    skipped = []
+    for attempt in range(1, max_attempts + 1):
+        step(f"create attempt {attempt}/{max_attempts}")
+        route = pick_route_with_available_partner(
+            api_client, booking_type, sa_locations, intl_locations, saudi_side
+        )
+        pickup, dropoff = route["pickup"], route["dropoff"]
+        delivery_partner = route["delivery_partner"]
+        actual_weight, length, width, height = route["weight_and_dimensions"]
+        check_package(actual_weight, length, width, height)
+
+        item_name = random.choice(ITEM_NAME_POOL)
+        hs_code = first_hs_code(api_client.get_hs_codes(item_name))
+        assert hs_code, "first_hs_code() returned an empty value."
+        step("hs_code resolved", item_name=item_name, hs_code=hs_code)
+
+        booking_detail = build_booking_detail(
+            booking_type=booking_type,
+            pickup_location=pickup,
+            dropoff_location=dropoff,
+            receiver_name=random.choice(RECEIVER_NAME_POOL),
+            hs_code=hs_code,
+            delivery_rates=route["delivery_rates"],
+            delivery_partner=delivery_partner,
+            weight_and_dimensions=route["weight_and_dimensions"],
+            item_name=item_name,
+        )
+        assert booking_detail["item_list_details"][0]["item_name"] == item_name, (
+            "item name sent must be the one the HS code was looked up for"
+        )
+        assert_exactly_one_saudi_side(
+            {"country_code": booking_detail["pickup_country_code"]},
+            {"country_code": booking_detail["dropoff_country_code"]},
+            context=f"booking_detail dict itself ({booking_type})",
+        )
+        assert booking_detail["stakeholders"], "Receiver mobile number (stakeholders) is empty."
+        assert booking_detail["sender_mobile_number"], "Sender mobile number is empty."
+        assert booking_detail["country_code"].startswith("+"), f"Receiver dial code looks wrong: {booking_detail['country_code']!r}"
+        assert booking_detail["sender_country_code"].startswith("+"), f"Sender dial code looks wrong: {booking_detail['sender_country_code']!r}"
+        expected_palletized = "true" if booking_type == "pallet" else "false"
+        assert booking_detail["is_palletized"] == expected_palletized, (
+            f"is_palletized must be {expected_palletized!r} for {booking_type}, got {booking_detail['is_palletized']!r}"
+        )
+        chosen_rate = booking_detail[f"delivery_rate_{delivery_partner}"]
+        assert chosen_rate and float(chosen_rate) > 0, (
+            f"delivery_rate_{delivery_partner} should hold the quoted amount but is {chosen_rate!r}"
+        )
+        step(
+            "booking_detail built",
+            partner=delivery_partner,
+            quoted_amount=chosen_rate,
+            is_palletized=booking_detail["is_palletized"],
+            receiver_phone=f"{booking_detail['country_code']}{booking_detail['stakeholders']}",
+            sender_phone=f"{booking_detail['sender_country_code']}{booking_detail['sender_mobile_number']}",
+            weight=actual_weight,
+            dims=(length, width, height),
+        )
+        dump_debug(f"{booking_type}_booking_detail_payload", booking_detail)
+
+        create_response = api_client.create_booking(booking_detail)
+        dump_debug(f"create_{booking_type}_booking_response", create_response)
+        step("create_booking response received", top_level_status=create_response.get("status"))
+        blacklist_bad_locations_from_error(create_response, pickup, dropoff)
+
+        reason = retryable_create_failure(create_response)
+        if reason is None:
+            raise_if_error_status(create_response, context=f"create_booking ({booking_type})")
+            booking_id = extract_booking_id(create_response)
+            payment_array = create_response.get("payment_array")
+            assert payment_array, "create_booking response has no payment_array."
+            ppd_amount = payment_array[0].get("ppd_amount")
+            assert isinstance(ppd_amount, (int, float)) and ppd_amount > 0, (
+                f"Booking {booking_id} has no price (ppd_amount={ppd_amount!r})"
+            )
+            step("booking priced by server", booking_id=booking_id, ppd_amount=ppd_amount, attempt=attempt)
+            return {
+                "create_response": create_response,
+                "booking_detail": booking_detail,
+                "booking_id": booking_id,
+                "ppd_amount": ppd_amount,
+                "pickup": pickup,
+                "dropoff": dropoff,
+                "delivery_partner": delivery_partner,
+                "skipped": skipped,
+            }
+
+        booking_report.add_row(
+            booking_type=booking_type_label(booking_type=booking_type, type_partner=booking_detail.get("type_partner", "b2c")),
+            booking_number="-",
+            route=route_label(pickup.get("country", ""), dropoff.get("country", "")),
+            delivery_partner=delivery_partner_label(delivery_partner),
+            status=f"SKIPPED: {reason}",
+        )
+        skipped.append(f"{delivery_partner} on {pickup.get('country')}->{dropoff.get('country')}: {reason}")
+        step("attempt skipped (not paid, will try another partner/route)", partner=delivery_partner, reason=reason)
+
+    raise AssertionError(
+        f"No priced {booking_type} booking after {max_attempts} attempts. Skipped:\n  - " + "\n  - ".join(skipped)
     )

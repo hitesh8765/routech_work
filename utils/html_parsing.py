@@ -127,3 +127,29 @@ def extract_status_badge(html: str) -> Optional[str]:
         if status in html:
             return status
     return None
+
+
+def has_usable_coordinates(loc: dict) -> bool:
+    """
+    False when latitude/longitude are missing, non-numeric, out of range, or
+    exactly 0. Evidence (2026-10-08): a saved Mauritius location with
+    latitude "0" / longitude "0" made /bookings/add answer
+    "Missing parameters." on dropoff_address, even with a perfectly good
+    partner (aramex). Such records are bad account data, not a partner issue.
+    """
+    try:
+        lat = float(loc.get("latitude"))
+        lng = float(loc.get("longitude"))
+    except (TypeError, ValueError):
+        return False
+    return lat != 0 and lng != 0 and -90 <= lat <= 90 and -180 <= lng <= 180
+
+
+def is_usable_location(loc: dict) -> bool:
+    """A saved location is usable only if it has an id, city, country code and real coordinates."""
+    return bool(
+        loc.get("id")
+        and (loc.get("city") or "").strip()
+        and (loc.get("country_code") or "").strip()
+        and has_usable_coordinates(loc)
+    )
