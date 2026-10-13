@@ -1,37 +1,39 @@
 """
-Cross-booking diversity/rotation rules, given directly by the user
-(2026-09-21 and refined 2026-09-22). These rules apply PER BOOKING, not
-per booking type -- e.g. Pallet's booking and the next Luggage booking
-must differ from each other, not just "differ within their own type".
+Cross-booking diversity + coverage tracking, driven by the user's rules.
 
-- Every booking must use a genuinely different pickup/dropoff LOCATION
-  than recent bookings (not just a different country) -- prefer
-  well-known/popular places where the account has such saved locations.
-- A non-Saudi location may only repeat after ~15-20 OTHER distinct
-  non-Saudi locations have been used since (cooldown here: 17).
-- A Saudi location may only repeat after ~6-8 OTHER distinct Saudi
-  locations have been used since (cooldown here: 7).
-- Exactly one side (pickup or dropoff) must be Saudi -- mandatory, enforced
-  elsewhere (arrange_pickup_dropoff in booking_payloads.py / the calling test).
-- Which side is Saudi must STRICTLY ALTERNATE booking to booking (not
-  random): if booking N had Saudi as pickup, booking N+1 must have Saudi
-  as dropoff -- globally, across ALL bookings regardless of type.
-- A different delivery partner must be used on every single booking (not
-  just per booking type) -- round-robins through every partner before
-  any repeat.
-- DHL (plain "DHL" AND every dhl_* variant) is intentionally EXCLUDED from
-  the rotation for now -- kept in the codebase/labels for future use, but
-  never selected, until the user says otherwise.
+LOCATIONS (user rules, 2026-09-21/22 -- apply PER BOOKING, not per type)
+- Every booking uses a genuinely different pickup/dropoff location.
+- A non-Saudi location may only repeat after ~15-20 OTHER distinct non-Saudi
+  locations (cooldown here: 17); a Saudi one after ~6-8 (cooldown: 7).
+- Exactly one side is Saudi (enforced by the caller) and the Saudi side
+  strictly alternates booking to booking, globally.
+- Locations the server rejected are blacklisted (mark_location_bad).
 
-All state persists to reports/diversity_state.json so it survives across
-separate `pytest` runs/sessions. This is DIFFERENT from
-reporting/excel_report.py's BookingReport state, which is a separate
-concern -- don't conflate the two.
+DELIVERY PARTNERS (user rule, 2026-10-09 -- supersedes the old global
+round-robin and every earlier include/exclude list)
+- EVERY partner that shows a quoted amount for a route is a candidate --
+  all DHL variants and all FedEx variants (freight included) are in. There
+  is no hand-maintained rotation list any more.
+- The goal is to test every available partner for EVERY booking type, so
+  coverage is tracked PER BOOKING TYPE: for each (type, partner) we count
+  attempts, passes and fails.
+- For a booking, the partner chosen is the LEAST-TESTED one (for that
+  booking type) among the partners quoted on that route; ties go to the one
+  tested longest ago. A partner that was tested -- including one skipped
+  because the server wouldn't price it -- moves to the back of the line and
+  comes round again once the others have had their turn.
+- Previously one global rotation index was shared by all booking types, so
+  with two tests per run Parcel always got the same partners and Pallet the
+  others, and a retry loop silently skipped every partner that failed.
 
-Each "next_*" function is atomic: it both picks AND records the choice in
-one call, so tests don't need a separate "remember to record" step (safer
-against partial test failures leaving state inconsistent).
+All state persists to reports/diversity_state.json (survives across runs);
+a readable coverage table is rewritten to reports/partner_coverage.csv.
+This is separate from reporting/excel_report.py's report.
+
+Each "next_*" function is atomic (picks AND records), so tests can't forget
+to record and leave state inconsistent.
 """
+import csv
 import json
 import random
 from pathlib import Path
@@ -41,56 +43,26 @@ STATE_PATH = Path(__file__).resolve().parent.parent / "reports" / "diversity_sta
 SAUDI_LOCATION_COOLDOWN = 7    # within the given 6-8 range
 INTL_LOCATION_COOLDOWN = 17    # within the given 15-20 range
 
-# RESTORED (2026-09-23): was briefly narrowed to just ["ups", "aramex"]
-# over a suspicion that fedex_* variants weren't valid selections. Checking
-# the actual accumulated reports/booking_report.xlsx disproved that --
-# "Fedex", "Fedex Express", "Fedex Priority", and "Fedex Connect Plus" all
-# show real "Shipment Submitted" successes across multiple runs. The
-# narrowing was the wrong fix; reverted. The "Requested"/intermittent
-# failures are NOT specifically tied to which partner was chosen.
-#
-# DHL added (2026-09-23) per direct user instruction: "start using DHL
-# delivery partner as well" -- supersedes the earlier "keep but don't use"
-# instruction. Only plain "dhl" added, not the dhl_* sub-variants
-# (DHL Medical Express etc.) -- those remain unconfirmed/unused until the
-# user says otherwise, same caution as the fedex sub-variants originally.
-#
-# FREIGHT variants removed (2026-10-07) -- REAL server error evidence,
-# not a guess: "fedex_priority_freight" was rejected with
-# booking.please_select_delivery_partners / "Please try again with
-# another delivery partner or change the location." (Saudi-Spain route),
-# and "fedex_regional_economy_freight" was rejected with
-# system.please_enter_valid_location (Niger-Saudi route) in the SAME test
-# run. Unlike the standard fedex_* variants above (which have multiple
-# CONFIRMED successes in the report), NONE of the three "_freight" suffixed
-# variants (fedex_priority_freight, fedex_regional_economy_freight,
-# fedex_economy_freight) have ever succeeded. These are freight/bulk-cargo
-# services, likely with different route/weight eligibility than standard
-# express/priority parcel services -- plausibly not offered at all for
-# arbitrary routes on this demo account. Removed from rotation; "darb" is
-# left in despite having no confirmed success OR failure yet (no evidence
-# against it specifically) -- watch for it in future runs.
-DELIVERY_PARTNER_ROTATION = [
-    "ups", "aramex", "dhl", "fedex", "fedex_priority", "fedex_express",
-    "fedex_regional", "fedex_connect_plus", "darb",
+# Every partner the app has shown (the delivery_rate_* fields of
+# /bookings/add). NOT a selection list -- any partner with a quoted amount
+# can be chosen -- it only lets the coverage table show partners that have
+# never been quoted yet. Includes ALL DHL and ALL FedEx variants.
+KNOWN_PARTNERS = [
+    "ups", "aramex", "darb",
+    "dhl", "dhl_express_worldwide", "dhl_express_easy", "dhl_economy_select",
+    "dhl_express_domestic", "dhl_medical_express", "dhl_freight_worldwide",
+    "fedex", "fedex_priority", "fedex_express", "fedex_regional", "fedex_connect_plus",
+    "fedex_priority_freight", "fedex_regional_economy_freight", "fedex_economy_freight",
 ]
-# Freight variants kept here for reference, NOT in the active rotation --
-# do not re-add without confirming the server actually accepts them for
-# some route (e.g. a much heavier/larger shipment than our current weight
-# ranges, if "freight" implies a minimum weight threshold):
-#   "fedex_priority_freight", "fedex_regional_economy_freight",
-#   "fedex_economy_freight"
+DELIVERY_PARTNER_ROTATION = KNOWN_PARTNERS  # backwards-compatible alias; no longer drives selection
 
-# Backfilled from real bookings already created before this stricter
-# per-booking tracker existed. Last Saudi side used = "pickup" (so the
-# next booking should flip to "dropoff"); partners already used = ups,
-# aramex, so the next fresh pick starts from idx 2 (fedex).
 _DEFAULT_STATE = {
     "used_saudi_location_ids": [],
     "used_intl_location_ids": [],
     "last_saudi_side": "pickup",
-    "partner_rotation_index": 2,
     "bad_location_ids": {},
+    "partner_coverage": {},   # {booking_type: {partner: {attempts, ok, bad, last_seq, last_outcome}}}
+    "partner_seq": 0,
 }
 
 
@@ -108,6 +80,9 @@ def _save(state: dict):
     STATE_PATH.write_text(json.dumps(state, indent=2))
 
 
+# ---------------------------------------------------------------------------
+# Saudi side
+# ---------------------------------------------------------------------------
 def next_saudi_side() -> str:
     """Strictly alternates which side is Saudi, booking to booking, globally. Atomic (picks + records)."""
     state = _load()
@@ -119,74 +94,129 @@ def next_saudi_side() -> str:
 
 
 def set_last_saudi_side(side: str):
-    """
-    For tests whose direction is fixed externally -- updates the
-    persisted 'last side used' to match reality, so the NEXT booking's
-    next_saudi_side() call still alternates correctly from true history.
-    Currently unused by any test (Parcel's parametrize was removed
-    2026-09-22), kept in case a dedicated both-directions regression test
-    is wanted later.
-    """
+    """For tests whose direction is fixed externally -- keeps the persisted 'last side used' truthful."""
     state = _load()
     state["last_saudi_side"] = side
     _save(state)
 
 
-def next_delivery_partner(available_partners: list = None) -> str:
+# ---------------------------------------------------------------------------
+# Delivery-partner coverage (per booking type)
+# ---------------------------------------------------------------------------
+def _entry(state: dict, booking_type: str, partner: str) -> dict:
+    cov = state.setdefault("partner_coverage", {}).setdefault(booking_type, {})
+    return cov.setdefault(partner, {"attempts": 0, "ok": 0, "bad": 0, "last_seq": 0, "last_outcome": ""})
+
+
+def register_seen_partners(booking_type: str, available_partners: list):
+    """Remember that these partners were quoted for this booking type (so 'never tested' is visible)."""
+    state = _load()
+    for partner in available_partners:
+        _entry(state, booking_type, partner)
+    _save(state)
+
+
+def rank_partners(booking_type: str, available_partners: list) -> list:
     """
-    Round-robins through DELIVERY_PARTNER_ROTATION, but ONLY among partners
-    that are actually bookable for this route.
-
-    RULE (user-mandated 2026-10-07): `available_partners` must be the
-    partners with a real quoted amount from get_delivery_and_rate (see
-    data/booking_payloads.py extract_available_partners). Picking a partner
-    without a quote is rejected by the server or leaves the booking stuck on
-    "Requested" forever. Rotation order is kept: starting from the saved
-    index, the first rotation entry that is available is used, and the index
-    moves just past it so the next booking tries the next partner.
-
-    Raises ValueError if none of the rotation partners is available for the
-    route -- the caller should pick a different location pair, not guess.
-    Atomic (picks + records).
+    The quoted partners ordered by how much they NEED testing for this
+    booking type: fewest attempts first, then tested-longest-ago, then name
+    (so the order is deterministic and explainable).
     """
     state = _load()
-    idx = state.get("partner_rotation_index", 0) % len(DELIVERY_PARTNER_ROTATION)
-
-    if available_partners is None:
-        raise ValueError(
-            "next_delivery_partner() now requires available_partners (the partners "
-            "with a quoted amount for this route) -- picking blindly caused rejected "
-            "and stuck 'Requested' bookings."
-        )
-
-    available = {p.lower() for p in available_partners}
-    for offset in range(len(DELIVERY_PARTNER_ROTATION)):
-        candidate_idx = (idx + offset) % len(DELIVERY_PARTNER_ROTATION)
-        candidate = DELIVERY_PARTNER_ROTATION[candidate_idx]
-        if candidate.lower() in available:
-            state["partner_rotation_index"] = (candidate_idx + 1) % len(DELIVERY_PARTNER_ROTATION)
-            _save(state)
-            return candidate
-
-    raise ValueError(
-        f"None of the rotation partners {DELIVERY_PARTNER_ROTATION} has a quote for this route "
-        f"(available with a quote: {sorted(available)})."
-    )
+    def key(partner):
+        e = _entry(state, booking_type, partner)
+        return (e["attempts"], e["last_seq"], partner)
+    return sorted(available_partners, key=key)
 
 
+def partner_attempts(booking_type: str, partner: str) -> int:
+    return _entry(_load(), booking_type, partner)["attempts"]
+
+
+def min_attempts_seen(booking_type: str) -> int:
+    """Lowest attempt count among every partner ever quoted for this booking type (0 if none yet)."""
+    cov = _load().get("partner_coverage", {}).get(booking_type, {})
+    return min((e["attempts"] for e in cov.values()), default=0)
+
+
+def commit_partner(booking_type: str, partner: str) -> str:
+    """Record that this partner is being tried now for this booking type. Atomic."""
+    state = _load()
+    state["partner_seq"] = state.get("partner_seq", 0) + 1
+    e = _entry(state, booking_type, partner)
+    e["attempts"] += 1
+    e["last_seq"] = state["partner_seq"]
+    _save(state)
+    write_partner_coverage_csv()
+    return partner
+
+
+def record_partner_outcome(booking_type: str, partner: str, ok: bool, detail: str = ""):
+    """Record how a tried partner ended up (ok = reached a success status)."""
+    state = _load()
+    e = _entry(state, booking_type, partner)
+    e["ok" if ok else "bad"] += 1
+    e["last_outcome"] = (detail or ("ok" if ok else "failed"))[:120]
+    _save(state)
+    write_partner_coverage_csv()
+
+
+def next_delivery_partner(booking_type: str, available_partners: list) -> str:
+    """
+    Pick the least-tested quoted partner for this booking type and record
+    the attempt. `available_partners` must be the partners with a quoted
+    amount for the route (see data/booking_payloads.extract_available_partners).
+    """
+    if not available_partners:
+        raise ValueError("next_delivery_partner() needs at least one partner with a quoted amount.")
+    register_seen_partners(booking_type, available_partners)
+    return commit_partner(booking_type, rank_partners(booking_type, available_partners)[0])
+
+
+def partner_coverage(booking_type: str = None) -> dict:
+    cov = _load().get("partner_coverage", {})
+    return cov if booking_type is None else cov.get(booking_type, {})
+
+
+def format_partner_coverage(booking_type: str) -> str:
+    """One-line summary for step() output, e.g. 'tested 3/9 | untested: aramex, darb, ...'."""
+    cov = partner_coverage(booking_type)
+    untested = sorted(p for p, e in cov.items() if e["attempts"] == 0)
+    tested = len(cov) - len(untested)
+    return f"tested {tested}/{len(cov)} seen" + (f" | untested: {', '.join(untested)}" if untested else " | all seen partners tested")
+
+
+def write_partner_coverage_csv():
+    """Rewrite reports/partner_coverage.csv: one row per (booking type, partner), incl. known-but-never-quoted ones."""
+    path = STATE_PATH.parent / "partner_coverage.csv"
+    cov = _load().get("partner_coverage", {})
+    path.parent.mkdir(exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(["booking_type", "partner", "attempts", "ok", "bad", "last_outcome"])
+        for booking_type in sorted(cov):
+            for partner in sorted(set(cov[booking_type]) | set(KNOWN_PARTNERS)):
+                e = cov[booking_type].get(partner)
+                if e is None:
+                    w.writerow([booking_type, partner, 0, 0, 0, "never quoted yet"])
+                else:
+                    w.writerow([booking_type, partner, e["attempts"], e["ok"], e["bad"], e["last_outcome"] or ("untested" if e["attempts"] == 0 else "")])
+
+
+# ---------------------------------------------------------------------------
+# Locations
+# ---------------------------------------------------------------------------
 def mark_location_bad(location_id: str, reason: str):
     """
     Permanently excludes a saved location whose data the server rejected
-    (e.g. "Missing parameters" / "Please enter valid location" on its
-    address). Persisted in reports/diversity_state.json under
-    "bad_location_ids" -> {id: reason}; delete the entry by hand to
-    re-enable a location after fixing its data in the app.
+    ("Missing parameters" / "Please enter valid location" on its address).
+    Persisted under "bad_location_ids" -> {id: reason}; delete the entry by
+    hand to re-enable a location after fixing its data in the app.
     """
     if not location_id:
         return
     state = _load()
-    bad = state.setdefault("bad_location_ids", {})
-    bad[location_id] = reason
+    state.setdefault("bad_location_ids", {})[location_id] = reason
     _save(state)
 
 
@@ -194,19 +224,19 @@ def get_bad_location_ids() -> dict:
     return dict(_load().get("bad_location_ids", {}))
 
 
-def next_fresh_location(locations: list[dict], is_saudi: bool) -> dict:
+def next_fresh_location(locations: list, is_saudi: bool, record: bool = True, exclude_ids=()) -> dict:
     """
-    Picks a location whose id hasn't been used within the relevant cooldown
-    window (Saudi: ~7 other locations since; non-Saudi: ~17), never picking
-    one blacklisted via mark_location_bad(). Falls back to the full
-    (non-blacklisted) pool if every location is still within cooldown.
-    Atomic (picks + records).
+    Picks a location not used within the cooldown window (Saudi ~7 other
+    locations since, non-Saudi ~17), never a blacklisted one and never one in
+    `exclude_ids`. Falls back to the full allowed pool if all are in cooldown.
+    record=False picks WITHOUT consuming cooldown (used while shopping for a
+    route; call record_location_usage() for the one actually used).
     """
     state = _load()
     bad = state.get("bad_location_ids", {})
-    locations = [loc for loc in locations if loc.get("id") not in bad]
+    locations = [loc for loc in locations if loc.get("id") not in bad and loc.get("id") not in exclude_ids]
     if not locations:
-        raise ValueError("No usable locations left (all are blacklisted via mark_location_bad).")
+        raise ValueError("No usable locations left (blacklisted or already tried).")
 
     key = "used_saudi_location_ids" if is_saudi else "used_intl_location_ids"
     cooldown = SAUDI_LOCATION_COOLDOWN if is_saudi else INTL_LOCATION_COOLDOWN
@@ -214,10 +244,16 @@ def next_fresh_location(locations: list[dict], is_saudi: bool) -> dict:
     recent = used_list[-cooldown:] if cooldown else []
 
     fresh = [loc for loc in locations if loc.get("id") not in recent]
-    pool = fresh if fresh else locations
-    chosen = random.choice(pool)
-
-    used_list.append(chosen.get("id"))
-    state[key] = used_list
-    _save(state)
+    chosen = random.choice(fresh if fresh else locations)
+    if record:
+        used_list.append(chosen.get("id"))
+        state[key] = used_list
+        _save(state)
     return chosen
+
+
+def record_location_usage(location: dict, is_saudi: bool):
+    state = _load()
+    key = "used_saudi_location_ids" if is_saudi else "used_intl_location_ids"
+    state.setdefault(key, []).append(location.get("id"))
+    _save(state)

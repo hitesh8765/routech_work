@@ -18,7 +18,19 @@ from data.booking_payloads import (
     extract_available_partners,
     random_weight_and_dimensions,
 )
-from data.diversity_tracker import mark_location_bad, next_delivery_partner, next_fresh_location
+from data.diversity_tracker import (
+    commit_partner,
+    format_partner_coverage,
+    mark_location_bad,
+    min_attempts_seen,
+    next_fresh_location,
+    partner_attempts,
+    rank_partners,
+    record_location_usage,
+    record_partner_outcome,
+    register_seen_partners,
+)
+from reporting.bug_report import SUSPECTED, log_bug
 from reporting.excel_report import booking_type_label, delivery_partner_label, route_label
 from utils.html_parsing import is_usable_location
 
@@ -36,6 +48,54 @@ def step(label: str, **details):
     """
     extra = " ".join(f"{k}={v!r}" for k, v in details.items())
     print(f"[step] {label}" + (f" -- {extra}" if extra else ""))
+
+
+def _route_text(pickup: dict, dropoff: dict) -> str:
+    return f"{pickup.get('city')}, {pickup.get('country')} -> {dropoff.get('city')}, {dropoff.get('country')}"
+
+
+def log_server_bug(kind: str, booking_type: str, partner: str = "", pickup: dict = None, dropoff: dict = None,
+                   detail: str = "", evidence: str = ""):
+    """
+    Records server-side behaviour that looks wrong in reports/bug_report.xlsx
+    (see reporting/bug_report.py). Rows start as "Suspected - verify in UI":
+    a failure can still be OUR payload, so the user/assistant confirms it
+    before it is reported to the app owner. Never raises.
+    """
+    route = _route_text(pickup, dropoff) if pickup and dropoff else ""
+    kinds = {
+        "unpriced_at_add": ("Partner with a quote is priced 0/null by /bookings/add", "Bug", "Medium", "POST /bookings/add",
+                            "Partner quoted by get_delivery_and_rate gets a real price at /bookings/add."),
+        "partner_rejected": ("Partner with a quote is rejected by /bookings/add", "Bug", "Medium", "POST /bookings/add",
+                             "A partner that has an amount in the quote can be booked."),
+        "stuck_after_payment": ("Priced and paid booking does not reach a success status", "Bug", "High", "Booking lifecycle",
+                                "Reaches 'Shipment Submitted' / 'Sent to Carrier' after payment."),
+        "payment_not_ok": ("Payment of a priced booking does not report success", "Bug", "Medium", "POST /bookings/make_ppd_payment",
+                           "Wallet payment of a priced booking succeeds."),
+        "zero_quote": ("Rate quote returns payable_amount 0 for a partner", "Bug", "Medium", "POST /bookings/get_delivery_and_rate",
+                       "A real price, or the partner omitted from 'amount'."),
+        "timeout": ("Request times out", "Performance", "Medium", "Booking flow",
+                    "A response within the allowed time."),
+        "bad_location": ("Saved location has invalid data and cannot be booked", "Data", "Medium", "Saved locations / POST /bookings/add",
+                         "Only locations with usable data can be saved and booked."),
+    }
+    title, category, severity, endpoint, expected = kinds[kind]
+    if kind == "timeout":
+        endpoint = evidence or endpoint
+        key = f"timeout|{endpoint}|{booking_type}"
+    elif kind == "bad_location":
+        key = f"bad_location|{dropoff.get('country') if dropoff else ''}|{dropoff.get('city') if dropoff else ''}"
+    else:
+        key = f"{kind if kind != 'unpriced_at_add' else 'quoted_but_unpriced_at_add'}|{booking_type}|{partner}"
+        if kind == "partner_rejected":
+            key = f"quoted_partner_rejected|{booking_type}|{partner}"
+    log_bug(
+        key,
+        once_per_session=kind in ("zero_quote", "bad_location"),
+        title=title, category=category, severity=severity, status=SUSPECTED, endpoint=endpoint,
+        booking_type=booking_type, partner=partner, scenario=route, expected=expected,
+        actual=detail, evidence=evidence if kind != "timeout" else detail[:200],
+    )
 
 
 def dump_debug(name: str, data) -> Path:
@@ -141,7 +201,7 @@ def wait_for_terminal_status(
     "Requested" is NOT terminal. Root cause of bookings stuck there
     forever (confirmed 2026-10-07): a delivery partner with no quoted
     amount for the route was selected. That is now prevented up front by
-    extract_available_partners() / next_delivery_partner(available_partners),
+    extract_available_partners() and the coverage-based pick in pick_route_with_available_partner(),
     so a booking still stuck here after 60s is a real, unexpected problem.
     """
     deadline = time.time() + timeout
@@ -165,30 +225,49 @@ def pick_route_with_available_partner(
     saudi_side: str,
     max_attempts: int = 6,
     choose_partner: bool = True,
+    max_coverage_quotes: int = 3,
 ):
     """
     Picks pickup/dropoff + weight/dimensions, quotes the REAL shipment via
-    get_delivery_and_rate, and chooses a delivery partner ONLY from partners
-    with a real quoted amount for that route (user-mandated rule,
-    2026-10-07). If the route has no usable partner, picks a different
-    location pair and tries again (the server's own advice: "Please try
-    again with another delivery partner or change the location") -- up to
-    max_attempts -- instead of blindly submitting a booking that gets
-    rejected or stuck on "Requested".
+    get_delivery_and_rate, and chooses the delivery partner.
+
+    RULES (user, 2026-10-07 and 2026-10-09):
+      * ONLY partners with a real quoted amount (extract_available_partners)
+        may be chosen -- all DHL and FedEx variants included.
+      * The goal is to test EVERY available partner for EVERY booking type,
+        so the partner chosen is the LEAST-TESTED one for this booking type
+        among those quoted (diversity_tracker.rank_partners). A partner that
+        was tried -- or skipped because it wouldn't price -- goes to the back
+        of the line and comes round again later.
+      * A given route only quotes some partners, so if the best candidate here
+        has already been tested more than some partner seen for this type,
+        up to `max_coverage_quotes` routes are quoted and the one offering the
+        least-tested partner is used. (Routes shopped but not used do NOT
+        consume the location cooldown.)
+      * A route with no usable partner is replaced by another location pair
+        (the server's own advice: "try another delivery partner or change
+        the location"), up to max_attempts.
+
+    choose_partner=False (probe mode): returns the first quoted route and
+    every available partner without choosing or counting anything.
 
     Returns dict: pickup, dropoff, weight_and_dimensions, delivery_rates,
     available_partners, delivery_partner.
     """
+    tried_ids = set()
+    best = None
+    quoted_routes = 0
     last_problem = "no attempt made"
     for attempt in range(1, max_attempts + 1):
-        saudi_location = next_fresh_location(sa_locations, is_saudi=True)
+        saudi_location = next_fresh_location(sa_locations, is_saudi=True, record=False, exclude_ids=tried_ids)
         assert (saudi_location.get("country_code") or "").upper() == "SA", (
             f"next_fresh_location(is_saudi=True) returned a non-Saudi location: {saudi_location!r}"
         )
-        intl_location = next_fresh_location(intl_locations, is_saudi=False)
+        intl_location = next_fresh_location(intl_locations, is_saudi=False, record=False, exclude_ids=tried_ids)
         assert (intl_location.get("country_code") or "").upper() != "SA", (
             f"next_fresh_location(is_saudi=False) returned a Saudi location: {intl_location!r}"
         )
+        tried_ids.update({saudi_location.get("id"), intl_location.get("id")})
         pickup, dropoff = arrange_pickup_dropoff(saudi_location, intl_location, saudi_side=saudi_side)
         assert_exactly_one_saudi_side(pickup, dropoff, context=f"route attempt {attempt} ({booking_type})")
         step(
@@ -202,55 +281,80 @@ def pick_route_with_available_partner(
         rate_payload = build_rate_payload(booking_type, pickup, dropoff, actual_weight, length, width, height)
         delivery_rates = api_client.get_delivery_and_rate(rate_payload)
         dump_debug(f"get_delivery_and_rate_{booking_type}_response", delivery_rates)
-
         assert delivery_rates.get("status") == "success", (
             f"get_delivery_and_rate did not return status 'success': {delivery_rates!r}"
         )
         quoted_days = sorted((delivery_rates.get("days") or {}).keys())
         available = extract_available_partners(delivery_rates)
         step("rates quoted", partners_in_days=quoted_days, partners_with_amount=available)
+        for zero_partner, info in (delivery_rates.get("amount") or {}).items():
+            if (info or {}).get("payable_amount") == 0:
+                log_server_bug("zero_quote", booking_type, zero_partner, pickup, dropoff,
+                               detail="amount[%s].payable_amount = 0" % zero_partner,
+                               evidence=f".auth/debug_get_delivery_and_rate_{booking_type}_response.json")
 
         if not available:
             last_problem = f"no partner has a quoted amount for {pickup.get('country')} -> {dropoff.get('country')}"
             step("route rejected, trying another location pair", reason=last_problem)
             continue
 
-        if not choose_partner:
-            # Probe mode: caller wants the route + every bookable partner and
-            # will try them all itself (see probe_partners()).
-            return {
-                "pickup": pickup,
-                "dropoff": dropoff,
-                "weight_and_dimensions": weight_and_dimensions,
-                "delivery_rates": delivery_rates,
-                "available_partners": available,
-                "delivery_partner": None,
-            }
-
-        try:
-            delivery_partner = next_delivery_partner(available_partners=available)
-        except ValueError as exc:
-            last_problem = str(exc)
-            step("route rejected, trying another location pair", reason=last_problem)
-            continue
-
-        assert delivery_partner in available, (
-            f"picked partner {delivery_partner!r} is not among partners with a quoted amount {available}"
-        )
-        step("delivery_partner picked (has quoted amount)", delivery_partner=delivery_partner)
-        return {
+        register_seen_partners(booking_type, available)
+        entry = {
             "pickup": pickup,
             "dropoff": dropoff,
+            "saudi_location": saudi_location,
+            "intl_location": intl_location,
             "weight_and_dimensions": weight_and_dimensions,
             "delivery_rates": delivery_rates,
             "available_partners": available,
-            "delivery_partner": delivery_partner,
         }
+        if not choose_partner:
+            record_location_usage(saudi_location, is_saudi=True)
+            record_location_usage(intl_location, is_saudi=False)
+            return {**entry, "delivery_partner": None}
 
-    raise AssertionError(
-        f"Could not find a route with a bookable delivery partner after {max_attempts} attempts "
-        f"for {booking_type}. Last problem: {last_problem}"
+        entry["candidate"] = rank_partners(booking_type, available)[0]
+        entry["candidate_attempts"] = partner_attempts(booking_type, entry["candidate"])
+        quoted_routes += 1
+        if best is None or entry["candidate_attempts"] < best["candidate_attempts"]:
+            best = entry
+        if entry["candidate_attempts"] <= min_attempts_seen(booking_type):
+            break  # this route offers a least-tested partner -- good enough
+        if quoted_routes >= max_coverage_quotes:
+            break
+        step(
+            "route has no least-tested partner, shopping for a better route",
+            candidate=entry["candidate"],
+            attempts=entry["candidate_attempts"],
+        )
+
+    if best is None:
+        raise AssertionError(
+            f"Could not find a route with a bookable delivery partner after {max_attempts} attempts "
+            f"for {booking_type}. Last problem: {last_problem}"
+        )
+
+    record_location_usage(best["saudi_location"], is_saudi=True)
+    record_location_usage(best["intl_location"], is_saudi=False)
+    attempts_before = best["candidate_attempts"]
+    delivery_partner = commit_partner(booking_type, best["candidate"])
+    assert delivery_partner in best["available_partners"], (
+        f"picked partner {delivery_partner!r} is not among partners with a quoted amount {best['available_partners']}"
     )
+    step(
+        "delivery_partner picked (quoted + least tested for this booking type)",
+        delivery_partner=delivery_partner,
+        times_tried_before=attempts_before,
+        coverage=format_partner_coverage(booking_type),
+    )
+    return {
+        "pickup": best["pickup"],
+        "dropoff": best["dropoff"],
+        "weight_and_dimensions": best["weight_and_dimensions"],
+        "delivery_rates": best["delivery_rates"],
+        "available_partners": best["available_partners"],
+        "delivery_partner": delivery_partner,
+    }
 
 
 def assert_exactly_one_saudi_side(pickup: dict, dropoff: dict, context: str = ""):
@@ -288,6 +392,12 @@ def usable_locations(locations: list) -> list:
     """
     good = [loc for loc in locations if is_usable_location(loc)]
     dropped = [loc for loc in locations if not is_usable_location(loc)]
+    for d in dropped:
+        log_server_bug(
+            "bad_location", "", pickup=None, dropoff=d,
+            detail=f"id={d.get('id')} lat={d.get('latitude')!r} lng={d.get('longitude')!r} city={d.get('city')!r} country_code={d.get('country_code')!r}",
+            evidence="saved location (booking_form option data-*)",
+        )
     if dropped:
         step(
             "ignored saved locations with bad data",
@@ -350,6 +460,12 @@ def log_failure_to_report(booking_report, booking_type: str, type_partner: str, 
             delivery_partner=delivery_partner_label(delivery_partner),
             status=f"FAILED: {text[:110]}",
         )
+        record_partner_outcome(booking_type, delivery_partner, False, f"FAILED: {text[:100]}")
+        if "timed out" in text.lower() or "timed out" in str(exc).lower():
+            log_server_bug("timeout", booking_type, delivery_partner, pickup, dropoff, detail=text[:200], evidence="payment/verification step")
+        elif text.startswith("Payment did not report success"):
+            log_server_bug("payment_not_ok", booking_type, delivery_partner, pickup, dropoff, detail=str(exc)[:300],
+                           evidence=f".auth/debug_make_ppd_{booking_type}_payment_response.json")
         raise
 
 
@@ -413,6 +529,12 @@ def probe_partners(api_client, booking_type: str, saudi_side: str, sa_locations:
                 "weight_dims": route["weight_and_dimensions"],
             }
         )
+        if outcome.startswith("NO PRICE"):
+            log_server_bug("unpriced_at_add", booking_type, partner, pickup, dropoff, detail=f"{outcome} (quoted {quoted})", evidence="probe: reports/partner_probe.csv")
+        elif outcome.startswith("REJECTED"):
+            log_server_bug("partner_rejected", booking_type, partner, pickup, dropoff, detail=outcome, evidence="probe: reports/partner_probe.csv")
+        elif "timed out" in outcome.lower():
+            log_server_bug("timeout", booking_type, partner, pickup, dropoff, detail=outcome, evidence="POST /bookings/add")
         step("probe", partner=partner, quoted=quoted, outcome=outcome)
     return results
 
@@ -555,7 +677,13 @@ def create_priced_booking(
         )
         dump_debug(f"{booking_type}_booking_detail_payload", booking_detail)
 
-        create_response = api_client.create_booking(booking_detail)
+        try:
+            create_response = api_client.create_booking(booking_detail)
+        except Exception as exc:  # noqa: BLE001 - re-raised
+            if "timed out" in str(exc).lower():
+                log_server_bug("timeout", booking_type, delivery_partner, pickup, dropoff,
+                               detail=str(exc).splitlines()[0][:200], evidence="POST /bookings/add")
+            raise
         dump_debug(f"create_{booking_type}_booking_response", create_response)
         step("create_booking response received", top_level_status=create_response.get("status"))
         blacklist_bad_locations_from_error(create_response, pickup, dropoff)
@@ -589,9 +717,27 @@ def create_priced_booking(
             delivery_partner=delivery_partner_label(delivery_partner),
             status=f"SKIPPED: {reason}",
         )
+        record_partner_outcome(booking_type, delivery_partner, False, f"SKIPPED: {reason}")
+        skipped_booking_id = ((create_response.get("booking_detail") or [{}])[0]).get("booking_id", "")
+        log_server_bug(
+            "unpriced_at_add" if reason.startswith("no price at add") else "partner_rejected",
+            booking_type, delivery_partner, pickup, dropoff,
+            detail=f"{reason} (partner had quoted amount {chosen_rate})",
+            evidence=(f"booking_id {skipped_booking_id}; " if skipped_booking_id else "")
+            + f".auth/debug_create_{booking_type}_booking_response.json",
+        )
         skipped.append(f"{delivery_partner} on {pickup.get('country')}->{dropoff.get('country')}: {reason}")
         step("attempt skipped (not paid, will try another partner/route)", partner=delivery_partner, reason=reason)
 
     raise AssertionError(
         f"No priced {booking_type} booking after {max_attempts} attempts. Skipped:\n  - " + "\n  - ".join(skipped)
+    )
+
+
+def log_status_bug(booking_type: str, partner: str, pickup: dict, dropoff: dict, booking_number: str, status: str):
+    """A booking that was priced AND paid but did not reach a success status within the wait."""
+    log_server_bug(
+        "stuck_after_payment", booking_type, partner, pickup, dropoff,
+        detail=f"status {status!r} after payment and the full wait (booking {booking_number})",
+        evidence=f"booking {booking_number}; reports/booking_report.xlsx",
     )

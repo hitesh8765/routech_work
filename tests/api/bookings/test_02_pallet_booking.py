@@ -24,7 +24,7 @@ See handoff.md for the confirmed API contract and open items.
 import pytest
 
 from data.booking_payloads import PALLET_WEIGHT_DIMENSION_COMBOS
-from data.diversity_tracker import next_saudi_side
+from data.diversity_tracker import next_saudi_side, record_partner_outcome
 from utils.html_parsing import saudi_locations, non_saudi_locations
 from reporting.excel_report import (
     booking_type_label,
@@ -40,6 +40,7 @@ from tests.api.bookings.booking_test_helpers import (
     create_priced_booking,
     usable_locations,
     log_failure_to_report,
+    log_status_bug,
     step,
 )
 
@@ -99,6 +100,7 @@ def test_create_pallet_booking(api_client, booking_report):
 
         status = wait_for_terminal_status(api_client, booking_id, SUCCESS_STATUSES, FAILURE_STATUSES)
         step("final status polled", status=status)
+        record_partner_outcome("pallet", delivery_partner, is_success_status(status), status)
 
         booking_report.add_row(
             booking_type=booking_type_label(
@@ -111,6 +113,8 @@ def test_create_pallet_booking(api_client, booking_report):
             status=status,
         )
 
+    if not is_success_status(status):
+        log_status_bug("pallet", delivery_partner, pickup, dropoff, booking_number, status)
     assert is_success_status(status), (
         f"Booking {booking_number} landed on status {status!r} after 60s, expected a success "
         f"status (Sent to Carrier / Shipment Submitted). Check .auth/debug_*.json for details."

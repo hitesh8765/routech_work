@@ -384,6 +384,12 @@ def build_booking_detail(
         partner_key = field[len("delivery_rate_"):]
         payable = (amounts.get(partner_key) or {}).get("payable_amount")
         detail[field] = str(payable) if payable not in (None, "") else ""
+    # Any partner with a quote can now be chosen: make sure the chosen one's
+    # rate is present even if its name is not in DELIVERY_PARTNER_RATE_FIELDS.
+    chosen_key = f"delivery_rate_{delivery_partner}"
+    chosen_payable = (amounts.get(delivery_partner) or {}).get("payable_amount")
+    if chosen_key not in detail and chosen_payable not in (None, ""):
+        detail[chosen_key] = str(chosen_payable)
 
     return detail
 

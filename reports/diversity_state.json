@@ -132,7 +132,19 @@
     "6a5628559a97104e1c056141",
     "6a0175822d6d560fa785ef89",
     "6a1562a284cb716b522233f0",
-    "69f871f2b4eb42cf32069960"
+    "69f871f2b4eb42cf32069960",
+    "6a043ae709b1a2ac801212a8",
+    "69fd913ac88d598b25489867",
+    "6a16e1497d0b5c7c7276558a",
+    "6a16c6be07d6682dbbc795d1",
+    "6a50e113c274b2cd60234624",
+    "69b93763d50e7a681af945bc",
+    "69b93763d50e7a681af945b9",
+    "6a1562a284cb716b522233f0",
+    "6a0e99ccd9f1f41d82a27c1f",
+    "6a2bb13c74854839324730a2",
+    "69f9d614d794e81c7bfbb9ac",
+    "6a28114048252e4d99248081"
   ],
   "used_intl_location_ids": [
     "6a06bac8a62c04c4b935bd93",
@@ -267,8 +279,118 @@
     "69f09951c30aa6adec7636b7",
     "69e76015a361f109eafe0c3c",
     "69f89943bfa43764c048bf3d",
-    "69faf20e13007428e8be997f"
+    "69faf20e13007428e8be997f",
+    "69b93763d50e7a681af945b6",
+    "69f34ac07eba4c7516eed1aa",
+    "69e9ded740414c07fe5d6cd7",
+    "69e760d2a361f109eafe0c5a",
+    "69f8994cbfa43764c048bf3e",
+    "69f053d0f6c888364bae7afd",
+    "69e74333168ed4ec35af08d6",
+    "69f1f58e1d030639cb3f48ee",
+    "69f9c278d794e81c7bfbb7d3",
+    "69e9e19440414c07fe5d70cd",
+    "6a193af3fff9927ec3e766e0",
+    "6abe00b6ad80caca9f52263b"
   ],
   "last_saudi_side": "dropoff",
-  "partner_rotation_index": 1
+  "partner_rotation_index": 1,
+  "partner_coverage": {
+    "parcel": {
+      "ups": {
+        "attempts": 0,
+        "ok": 0,
+        "bad": 0,
+        "last_seq": 0,
+        "last_outcome": ""
+      },
+      "aramex": {
+        "attempts": 1,
+        "ok": 1,
+        "bad": 0,
+        "last_seq": 1,
+        "last_outcome": "Shipment Submitted"
+      },
+      "fedex_priority": {
+        "attempts": 0,
+        "ok": 0,
+        "bad": 0,
+        "last_seq": 0,
+        "last_outcome": ""
+      },
+      "fedex": {
+        "attempts": 1,
+        "ok": 0,
+        "bad": 1,
+        "last_seq": 4,
+        "last_outcome": "SKIPPED: no price at add (ppd_amount=None)"
+      },
+      "dhl_medical_express": {
+        "attempts": 0,
+        "ok": 0,
+        "bad": 0,
+        "last_seq": 0,
+        "last_outcome": ""
+      },
+      "dhl_express_worldwide": {
+        "attempts": 1,
+        "ok": 0,
+        "bad": 1,
+        "last_seq": 5,
+        "last_outcome": "SKIPPED: no price at add (ppd_amount=None)"
+      },
+      "dhl_express_easy": {
+        "attempts": 1,
+        "ok": 0,
+        "bad": 1,
+        "last_seq": 3,
+        "last_outcome": "SKIPPED: no price at add (ppd_amount=None)"
+      },
+      "fedex_connect_plus": {
+        "attempts": 0,
+        "ok": 0,
+        "bad": 0,
+        "last_seq": 0,
+        "last_outcome": ""
+      }
+    },
+    "pallet": {
+      "dhl_express_worldwide": {
+        "attempts": 0,
+        "ok": 0,
+        "bad": 0,
+        "last_seq": 0,
+        "last_outcome": ""
+      },
+      "ups": {
+        "attempts": 1,
+        "ok": 1,
+        "bad": 0,
+        "last_seq": 6,
+        "last_outcome": "Shipment Submitted"
+      },
+      "aramex": {
+        "attempts": 1,
+        "ok": 1,
+        "bad": 0,
+        "last_seq": 2,
+        "last_outcome": "Shipment Submitted"
+      },
+      "fedex_priority_freight": {
+        "attempts": 0,
+        "ok": 0,
+        "bad": 0,
+        "last_seq": 0,
+        "last_outcome": ""
+      },
+      "fedex_economy_freight": {
+        "attempts": 0,
+        "ok": 0,
+        "bad": 0,
+        "last_seq": 0,
+        "last_outcome": ""
+      }
+    }
+  },
+  "partner_seq": 6
 }

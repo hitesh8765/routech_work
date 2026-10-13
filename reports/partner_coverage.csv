@@ -1,0 +1,37 @@
+booking_type,partner,attempts,ok,bad,last_outcome
+pallet,aramex,1,1,0,Shipment Submitted
+pallet,darb,0,0,0,never quoted yet
+pallet,dhl,0,0,0,never quoted yet
+pallet,dhl_economy_select,0,0,0,never quoted yet
+pallet,dhl_express_domestic,0,0,0,never quoted yet
+pallet,dhl_express_easy,0,0,0,never quoted yet
+pallet,dhl_express_worldwide,0,0,0,untested
+pallet,dhl_freight_worldwide,0,0,0,never quoted yet
+pallet,dhl_medical_express,0,0,0,never quoted yet
+pallet,fedex,0,0,0,never quoted yet
+pallet,fedex_connect_plus,0,0,0,never quoted yet
+pallet,fedex_economy_freight,0,0,0,untested
+pallet,fedex_express,0,0,0,never quoted yet
+pallet,fedex_priority,0,0,0,never quoted yet
+pallet,fedex_priority_freight,0,0,0,untested
+pallet,fedex_regional,0,0,0,never quoted yet
+pallet,fedex_regional_economy_freight,0,0,0,never quoted yet
+pallet,ups,1,1,0,Shipment Submitted
+parcel,aramex,1,1,0,Shipment Submitted
+parcel,darb,0,0,0,never quoted yet
+parcel,dhl,0,0,0,never quoted yet
+parcel,dhl_economy_select,0,0,0,never quoted yet
+parcel,dhl_express_domestic,0,0,0,never quoted yet
+parcel,dhl_express_easy,1,0,1,SKIPPED: no price at add (ppd_amount=None)
+parcel,dhl_express_worldwide,1,0,1,SKIPPED: no price at add (ppd_amount=None)
+parcel,dhl_freight_worldwide,0,0,0,never quoted yet
+parcel,dhl_medical_express,0,0,0,untested
+parcel,fedex,1,0,1,SKIPPED: no price at add (ppd_amount=None)
+parcel,fedex_connect_plus,0,0,0,untested
+parcel,fedex_economy_freight,0,0,0,never quoted yet
+parcel,fedex_express,0,0,0,never quoted yet
+parcel,fedex_priority,0,0,0,untested
+parcel,fedex_priority_freight,0,0,0,never quoted yet
+parcel,fedex_regional,0,0,0,never quoted yet
+parcel,fedex_regional_economy_freight,0,0,0,never quoted yet
+parcel,ups,0,0,0,untested

@@ -1008,3 +1008,106 @@ pays and never touches the Saudi-side or partner rotation state. Side effect:
   retry/skip/blacklist/probe logic was verified offline with a fake client
   against the real response shapes (success, price-0, partner rejection, bad
   address, real validation error, payment failure, "Requested" polling).
+
+## 18. Session addendum (2026-10-09, final) — partner COVERAGE per booking type, and the application bug report
+
+**User decisions (supersede §15's exclusions, §16's rotation list and §17's two open questions):**
+- **ALL DHL variants and ALL FedEx variants (freight included) are in.** Any
+  partner with a quoted amount for the route is a candidate; there is no
+  include/exclude list any more.
+- **Every available partner must be tested for EVERY booking type** — it is
+  not acceptable for "particular partners to be used for particular booking
+  types". A partner that was tried, including one skipped because the server
+  would not price it, goes to the back of the line and comes round again.
+- `is_palletized` must be `"true"` for Pallet (rate quote AND booking) and
+  `"false"` for Parcel — re-verified at both sites in `booking_payloads.py`
+  and asserted in `create_priced_booking()`.
+
+**Why the old rotation failed (observed in `reports/`):** one global rotation
+index was shared by all booking types and two tests ran per session, so
+Parcel always got the same partners (Aramex) and Pallet the others (UPS);
+the retry loop silently skipped every failing partner; the index sat at 2.
+
+**New partner selection — `data/diversity_tracker.py`:**
+- State (`reports/diversity_state.json`): `partner_coverage` =
+  `{booking_type: {partner: {attempts, ok, bad, last_seq, last_outcome}}}`
+  plus `partner_seq`. Readable copy rewritten to
+  `reports/partner_coverage.csv` (also lists KNOWN_PARTNERS never quoted yet).
+  The old `partner_rotation_index` is ignored.
+- `rank_partners(type, available)` orders the quoted partners by fewest
+  attempts for THAT booking type, then tested-longest-ago, then name.
+- `pick_route_with_available_partner()` (helpers) quotes a route and takes
+  the top-ranked partner. If that partner has been tried more than some
+  partner already seen for this type, it shops up to 3 routes for one offering
+  a least-tested partner. Shopped-but-unused routes do NOT consume the
+  location cooldown (`next_fresh_location(record=False)`; usage recorded
+  only for the chosen route). `commit_partner()` counts the attempt;
+  `record_partner_outcome()` records ok/bad (skipped attempts, failures after
+  creation, and the final status).
+- `next_delivery_partner(booking_type, available_partners)` still exists
+  (rank + commit); `DELIVERY_PARTNER_ROTATION` is only an alias of
+  `KNOWN_PARTNERS` and no longer drives selection.
+- The builder now also fills `delivery_rate_<partner>` for a chosen partner
+  whose name is not in `DELIVERY_PARTNER_RATE_FIELDS`.
+- Offline simulation (30 runs x parcel+pallet, routes quoting different
+  partner sets, some (type, partner) combos that never price): 0 test
+  failures, all 17 quoted partners tested for BOTH booking types (incl. every
+  DHL and FedEx variant), and every non-pricing combo was skipped each time
+  but retried again in later cycles.
+
+**Application bug report — `reports/bug_report.xlsx` (new, appended to for the
+rest of the project; module `reporting/bug_report.py`):**
+- Purpose (user): list every bug in the APPLICATION (server/app behaviour,
+  not our own mistakes) so they can all be reported when the project ends.
+- One row per distinct bug, keyed by the `Dedupe Key` column. Seeing it again
+  only bumps `Occurrences` / `Last Seen` and refreshes the latest
+  scenario/actual/evidence. The file is edited IN PLACE, so anything the user
+  changes by hand (Status, Severity, Notes, colours, extra columns) is kept.
+  Do not delete the `Dedupe Key` column. Close the file in Excel before a run
+  (if it is open the entry is kept in memory and saved on the next log / at
+  exit; the run itself never fails because of it).
+- Columns: Bug ID, Title, Category, Severity, Status, Endpoint / Area,
+  Booking Type, Delivery Partner, Scenario / Route, Expected, Actual,
+  Evidence, First Seen, Last Seen, Occurrences, Notes, Dedupe Key.
+- **Status values:** `Confirmed` (conclusive evidence in saved responses),
+  `Suspected - verify in UI` (auto-logged: could still be OUR payload, as
+  `is_palletized` was), `Unconfirmed - retest pending`,
+  `Needs product decision`. After checking, change it to Confirmed or
+  "Not a bug" by hand.
+- **Pre-filled with 13 bugs already observed** (BUG-001..013): /bookings/add
+  accepts an unpriced partner and creates a hidden unpriced booking that stays
+  "Requested" (booking 540161); make_ppd_payment reports success for a null
+  price; create returns `"status": "error"` on success (x38); rate quote with
+  `payable_amount: 0` (aramex, pallet); saved Mauritius location with lat/lng
+  0 accepted and rejected with the key-less "Missing parameters."; /bookings/add
+  30 s timeouts (x2, first-seen date approximate); `days` listing partners
+  without `amount`; HTML inside `wallet_amount`; receiver name rejects hyphens
+  (needs product decision); error responses echo `_csrf`/`user_id`; and three
+  Fedex (Express/Priority/Connect Plus) Parcel bookings stuck "Requested"
+  (Unconfirmed: logged before availability was checked — retest).
+  **Deliberately NOT included because they were our mistakes:** choosing
+  partners without a quote, the wrong `is_palletized` (UPS pallets priced 0),
+  the HS-code/item-name mismatch, and the sender/receiver phone-length issues.
+- **Automatic logging** (all `Suspected - verify in UI`; helper
+  `log_server_bug()` in `booking_test_helpers.py`, keys in brackets):
+  zero-amount quote (`zero_quote|type|partner`, once per session); a partner
+  that HAD a quote but was priced 0/null at add
+  (`quoted_but_unpriced_at_add|type|partner`) or rejected
+  (`quoted_partner_rejected|type|partner`); saved location with bad data
+  (`bad_location|country|city`, once per session); request timeout
+  (`timeout|endpoint|type`); payment not reporting success
+  (`payment_not_ok|type|partner`); priced-and-paid booking not reaching a
+  success status (`stuck_after_payment|type|partner`). The probe logs
+  unpriced/rejected/timeout too.
+- **Rule for future sessions:** whenever a NEW server-side oddity is found
+  during recon or debugging, add it with `log_bug(...)` (or, if the file does
+  not exist yet, to `KNOWN_BUGS`) with evidence and an honest Status — do not
+  record our own payload mistakes as app bugs. At project end the user exports
+  this file as the application bug report.
+
+**Still open / to verify live (everything above was verified offline against a
+fake client using the real response shapes; the assistant cannot reach the
+site):** FedEx on Parcel after `is_palletized` and quote-gating (BUG-011..013);
+whether the ghost unpriced bookings created by skipped attempts are really
+invisible/harmless in the app; the Saudi-side parity lock (history confounds
+type and direction until a third booking test is added).
