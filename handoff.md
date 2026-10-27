@@ -50,7 +50,12 @@ shipping/booking demo application.
 8. **Actual Weight:** random int in [8, 16] (commonly 10, 15, 12).
 9. **Dimensions:** Length > Width > Height, picked as a **whole combo**
    (not independently randomized) from:
-   `(14,13,11), (15,12,11), (13,11,9), (15,11,10), (13,10,8)`.
+   `    (10, 40, 35, 30),
+    (11, 45, 35, 30),
+    (12, 45, 40, 30),
+    (13, 50, 40, 30),
+    (14, 50, 45, 30),
+    (15, 55, 45, 30)`.
 10. **Receiver Mobile Number:** 10 digits, starts with `96________`.
 11. **Sender Name / Sender Mobile:** auto-filled by the account — just
     assert non-empty, never fill manually.
@@ -1111,3 +1116,37 @@ site):** FedEx on Parcel after `is_palletized` and quote-gating (BUG-011..013);
 whether the ghost unpriced bookings created by skipped attempts are really
 invisible/harmless in the app; the Saudi-side parity lock (history confounds
 type and direction until a third booking test is added).
+
+## 19. Session addendum (2026-10-17) — Documents (Envelope) booking confirmed
+
+**Documents booking type — CONFIRMED working (2026-10-17):** live recon session
+captured the full flow for a B2B Documents booking (wire type `envelope`).
+Key differences from Parcel/Pallet:
+- `booking_type` is `"envelope"`.
+- **Actual Weight**: ALWAYS `1` or `2` (user rule).
+- **Dimensions**: fixed at `length=1, width=1, height=1`.
+- **Item Details**: fixed to `item_name="Envelope Shipment"`, `item_quantity="1"`,
+  `item_price="1"`. **NO `hs_code` field** and NO HS code lookup is performed.
+- **Scheduled Time**: `scheduled_time` is filled with the current local time
+  (e.g., `"YYYY-MM-DD HH:MM"`), even though `schedule_type` is `"schedule_now"`.
+- **Rate Quote**: `package_dimension[0][weight]` is `"0"` (no volumetric weight
+  for Documents), and `higher_weight` equals the actual weight.
+- **Payment**: The UI sends extra Tabby fields and an incorrect `amount`
+  (base + fuel surcharge), but the framework's proven wallet-only payload
+  (`is_wallet=true, pay_online=0, wallet_amount=<wallet_data>, amount=<ppd_amount>,
+  payment_array=<response.payment_array>, payment_type=["wallet"]`) is expected
+  to work. Watch the first live run to confirm the server accepts it without
+  the Tabby fields.
+- **Status**: Observed list status "Shipment Submitted" but details badge
+  "In Transit" shortly after creation. The test polls for 60s and fails if
+  it ends on a failure status (e.g., "In Transit" for Documents is treated
+  as a failure right after creation, per user confirmation).
+
+**Implementation notes:**
+- `data/booking_payloads.py` now handles `booking_type == "envelope"` by
+  injecting the fixed item/dimension data and skipping HS code logic.
+- `tests/api/bookings/test_03_documents_booking.py` follows the same
+  `create_priced_booking` pattern, with a custom `check_envelope_package`
+  assertion (weight in `[1, 2]`, dims == `(1, 1, 1)`).
+- `booking_test_helpers.py`'s `create_priced_booking` now skips the
+  `get_hs_codes` API call when `booking_type == "envelope"`.

@@ -741,3 +741,184 @@ def log_status_bug(booking_type: str, partner: str, pickup: dict, dropoff: dict,
         detail=f"status {status!r} after payment and the full wait (booking {booking_number})",
         evidence=f"booking {booking_number}; reports/booking_report.xlsx",
     )
+#************************************************************
+
+"""
+Shared helpers for the per-booking-type E2E API tests.
+"""
+
+
+from data.booking_payloads import (
+    arrange_pickup_dropoff,
+    build_rate_payload,
+    extract_available_partners,
+    random_weight_and_dimensions,
+    build_booking_detail,
+    RECEIVER_NAME_POOL,
+    ITEM_NAME_POOL,
+)
+from data.diversity_tracker import next_delivery_partner, next_fresh_location
+from reporting.excel_report import booking_type_label, route_label, delivery_partner_label
+
+DEBUG_DIR = Path(__file__).resolve().parent.parent.parent.parent / ".auth"
+DEBUG_DIR.mkdir(exist_ok=True)
+
+def step(label: str, **details):
+    extra = " ".join(f"{k}={v!r}" for k, v in details.items())
+    print(f"[step] {label}" + (f" -- {extra}" if extra else ""))
+
+def dump_debug(name: str, data) -> Path:
+    path = DEBUG_DIR / f"debug_{name}.json"
+    path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+    return path
+
+def first_hs_code(hs_code_response) -> str:
+    if isinstance(hs_code_response, dict):
+        results = hs_code_response.get("result") or hs_code_response.get("results") or hs_code_response.get("data")
+        if results is not None:
+            return first_hs_code(results)
+    if isinstance(hs_code_response, list) and hs_code_response:
+        first = hs_code_response[0]
+        if isinstance(first, dict):
+            for key in ("hs_code", "code", "value", "id"):
+                if key in first:
+                    return str(first[key])
+            raise AssertionError(f"First HS code result has none of the expected keys. Full item: {first!r}")
+        return str(first)
+    raise AssertionError(f"Could not extract an HS code from response: {hs_code_response!r}")
+
+def raise_if_error_status(response: dict, context: str):
+    if not isinstance(response, dict) or response.get("status") != "error":
+        return
+    if "message" not in response and "req_data" not in response:
+        return
+    messages = response.get("message", [])
+    details = "; ".join(f"{m.get('param', '?')}: {m.get('msg', m)}" if isinstance(m, dict) else str(m) for m in messages) or "(no message details)"
+    raise AssertionError(f"{context} returned an error status -- {details}")
+
+def extract_booking_id(create_response: dict) -> str:
+    booking_detail = create_response.get("booking_detail")
+    if isinstance(booking_detail, list) and booking_detail:
+        booking_id = booking_detail[0].get("booking_id")
+        if booking_id:
+            return str(booking_id)
+    raise AssertionError(f"Could not find booking_id in create_booking response: {create_response!r}")
+
+def wait_for_terminal_status(api_client, booking_id: str, success_statuses: set, failure_statuses: set, timeout: float = 60, interval: float = 3):
+    deadline = time.time() + timeout
+    last_status = None
+    polls = 0
+    while time.time() < deadline:
+        polls += 1
+        last_status = api_client.booking_status_from_details(booking_id)
+        print(f"[poll {polls}] booking {booking_id} status={last_status!r}")
+        if last_status in success_statuses or last_status in failure_statuses:
+            return last_status
+        time.sleep(interval)
+    return last_status
+
+def create_priced_booking(api_client, booking_report, booking_type: str, sa_locations: list, intl_locations: list, saudi_side: str, check_package_func, max_attempts: int = 3):
+    for attempt in range(1, max_attempts + 1):
+        try:
+            saudi_location = next_fresh_location(sa_locations, is_saudi=True)
+            assert (saudi_location.get("country_code") or "").upper() == "SA", f"next_fresh_location(is_saudi=True) returned non-Saudi: {saudi_location!r}"
+            intl_location = next_fresh_location(intl_locations, is_saudi=False)
+            assert (intl_location.get("country_code") or "").upper() != "SA", f"next_fresh_location(is_saudi=False) returned Saudi: {intl_location!r}"
+            
+            pickup, dropoff = arrange_pickup_dropoff(saudi_location, intl_location, saudi_side=saudi_side)
+            step(f"route attempt {attempt}", pickup=f"{pickup.get('city')}, {pickup.get('country')}", dropoff=f"{dropoff.get('city')}, {dropoff.get('country')}")
+
+            weight_and_dimensions = random_weight_and_dimensions(booking_type)
+            actual_weight, length, width, height = weight_and_dimensions
+            check_package_func(actual_weight, length, width, height)
+
+            rate_payload = build_rate_payload(booking_type, pickup, dropoff, actual_weight, length, width, height)
+            delivery_rates = api_client.get_delivery_and_rate(rate_payload)
+            dump_debug(f"get_delivery_and_rate_{booking_type}_response", delivery_rates)
+
+            assert delivery_rates.get("status") == "success", f"get_delivery_and_rate did not return status 'success': {delivery_rates!r}"
+            available = extract_available_partners(delivery_rates)
+            step("rates quoted", partners_with_amount=available)
+
+            if not available:
+                step("route rejected, trying another location pair", reason="no partner has a quoted amount")
+                continue
+
+            try:
+                delivery_partner = next_delivery_partner(available_partners=available)
+            except ValueError as exc:
+                step("route rejected, trying another location pair", reason=str(exc))
+                continue
+
+            assert delivery_partner in available, f"picked partner {delivery_partner!r} is not among partners with a quoted amount {available}"
+            step("delivery_partner picked (has quoted amount)", delivery_partner=delivery_partner)
+
+            receiver_name = random.choice(RECEIVER_NAME_POOL)
+
+            # SKIP HS LOOKUP FOR ENVELOPE/DOCUMENTS
+            if booking_type == "envelope":
+                hs_code = ""
+                item_name_for_lookup = "Envelope Shipment"
+            else:
+                item_name_for_lookup = random.choice(ITEM_NAME_POOL)
+                hs_code = first_hs_code(api_client.get_hs_codes(item_name_for_lookup))
+                assert hs_code, "first_hs_code() returned an empty value."
+            
+            step("hs_code resolved", item_name=item_name_for_lookup, hs_code=hs_code or "N/A")
+
+            booking_detail = build_booking_detail(
+                booking_type=booking_type,
+                pickup_location=pickup,
+                dropoff_location=dropoff,
+                receiver_name=receiver_name,
+                hs_code=hs_code,
+                delivery_rates=delivery_rates,
+                delivery_partner=delivery_partner,
+                weight_and_dimensions=weight_and_dimensions,
+                item_name=item_name_for_lookup if booking_type != "envelope" else None,
+            )
+
+            step("booking_detail built", partner=delivery_partner, weight=actual_weight, dims=(length, width, height))
+            dump_debug(f"{booking_type}_booking_detail_payload", booking_detail)
+
+            create_response = api_client.create_booking(booking_detail)
+            dump_debug(f"create_{booking_type}_booking_response", create_response)
+            step("create_booking response received", top_level_status=create_response.get("status"))
+            raise_if_error_status(create_response, context=f"create_booking ({booking_type})")
+
+            payment_array = create_response.get("payment_array")
+            assert payment_array, "create_booking response has no payment_array."
+            
+            ppd_amount = payment_array[0].get("ppd_amount")
+            if isinstance(ppd_amount, (int, float)) and ppd_amount > 0:
+                step("booking successfully priced by server", ppd_amount=ppd_amount)
+                return {
+                    "create_response": create_response,
+                    "booking_detail": booking_detail,
+                    "booking_id": payment_array[0].get("booking_id"),
+                    "pickup": pickup,
+                    "dropoff": dropoff,
+                    "delivery_partner": delivery_partner,
+                }
+            else:
+                step(f"Attempt {attempt}: Server returned ppd_amount={ppd_amount} for {delivery_partner}. Retrying...", ppd_amount=ppd_amount)
+                
+        except Exception as e:
+            step(f"Attempt {attempt} failed with exception: {e}")
+            continue
+
+    raise AssertionError(f"Failed to create a priced booking after {max_attempts} attempts.")
+
+@contextmanager
+def log_failure_to_report(booking_report, booking_type: str, type_partner: str, pickup: dict, dropoff: dict, delivery_partner: str):
+    try:
+        yield
+    except Exception as e:
+        booking_report.add_row(
+            booking_type=booking_type_label(booking_type=booking_type, type_partner=type_partner),
+            booking_number="FAILED",
+            route=route_label(pickup.get("country", ""), dropoff.get("country", "")),
+            delivery_partner=delivery_partner_label(delivery_partner),
+            status=f"FAILED: {str(e)[:50]}",
+        )
+        raise

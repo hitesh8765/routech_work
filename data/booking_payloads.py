@@ -8,13 +8,11 @@ during the walkthrough:
     types -- see data/diversity_tracker.py.
   - Insurance: always "No".
   - Shipment Invoice: always "Create Invoice" (never "Upload Invoice").
-  - Item Name: random from ITEM_NAME_POOL.
-  - Item Quantity: random from ITEM_QUANTITY_POOL.
-  - HS Code: looked up using the SAME string as the item name (the site's
-    autocomplete is then used to pick a real code -- see
-    RoutechAPIClient.get_hs_codes).
-  - Item Price: random from ITEM_PRICE_POOL.
-  - Actual Weight: random int in [8, 16].
+  - Item Name: random from ITEM_NAME_POOL (except Envelope, which is fixed).
+  - Item Quantity: random from ITEM_QUANTITY_POOL (except Envelope, which is fixed).
+  - HS Code: looked up using the SAME string as the item name (except Envelope, which has none).
+  - Item Price: random from ITEM_PRICE_POOL (except Envelope, which is fixed).
+  - Actual Weight: random int in [8, 16] for Parcel; 1 or 2 for Envelope.
   - Length > Width > Height, chosen as one whole combo from
     DIMENSION_COMBO_POOL (never assembled from independently-random parts,
     to preserve the length > width > height ordering rule).
@@ -36,6 +34,7 @@ Field-name mapping confirmed by live capture of POST /bookings/add:
         Australia pickup, not a fixed Saudi default)
 """
 import random
+from datetime import datetime
 from typing import Literal
 
 from data.phone_formats import get_phone_format
@@ -60,13 +59,14 @@ RECEIVER_NAME_POOL = [
 # specified -- picked as a whole combo, never mixed-and-matched. PARCEL-ONLY
 # (small items). For Pallet, see PALLET_WEIGHT_DIMENSION_COMBOS below.
 DIMENSION_COMBO_POOL = [
-    (14, 13, 11),
-    (15, 12, 11),
-    (13, 11, 9),
-    (15, 11, 10),
-    (13, 10, 8),
+    (10, 40, 35, 30),
+    (11, 45, 35, 30),
+    (12, 45, 40, 30),
+    (13, 50, 40, 30),
+    (14, 50, 45, 30),
+    (15, 55, 45, 30),
 ]
-ACTUAL_WEIGHT_RANGE = (8, 16)
+ACTUAL_WEIGHT_RANGE = (10, 15)
 
 # PALLET-ONLY rule, REPLACED 2026-09-23 (superseded the previous separate
 # weight-range + length>width>height dimension pool -- that rule is now
@@ -145,14 +145,16 @@ def build_rate_payload(
 ) -> dict:
     """
     Payload for /bookings/get_delivery_and_rate built from the REAL
-    weight/dimensions of the booking about to be created. (Previously the
-    tests quoted a fixed 10 kg 15x12x11 parcel even for Pallet bookings, so
-    availability was being checked against the wrong shipment.)
+    weight/dimensions of the booking about to be created.
     """
-    dimension_weight = volumetric_weight(length, width, height)
-    higher_weight = max(actual_weight, dimension_weight)
+    if booking_type == "envelope":
+        # Documents have no volumetric weight; higher_weight equals actual weight
+        dimension_weight = 0
+        higher_weight = actual_weight
+    else:
+        dimension_weight = volumetric_weight(length, width, height)
+        higher_weight = max(actual_weight, dimension_weight)
     
-    # FIX: Set is_palletized to "true" for Pallet bookings
     is_palletized = "true" if booking_type == "pallet" else "false"
     
     return {
@@ -190,16 +192,18 @@ def random_weight_and_dimensions(booking_type: str = "parcel") -> tuple:
 
     Parcel: weight and dimension-combo are independently randomized
     (weight from ACTUAL_WEIGHT_RANGE; dims as a whole combo from
-    DIMENSION_COMBO_POOL, preserving length>width>height) -- unchanged
-    from the original rule.
+    DIMENSION_COMBO_POOL, preserving length>width>height).
 
     Pallet: all four values picked together, whole, from
-    PALLET_WEIGHT_DIMENSION_COMBOS -- weight and dimensions are coupled
-    per the user's exact given combos, NOT independently randomized, and
-    do NOT follow length>width>height (see comment above the pool).
+    PALLET_WEIGHT_DIMENSION_COMBOS.
+
+    Envelope: weight is ALWAYS 1 or 2, dimensions are fixed at 1x1x1.
     """
     if booking_type == "pallet":
         return random.choice(PALLET_WEIGHT_DIMENSION_COMBOS)
+    if booking_type == "envelope":
+        return random.choice([1, 2]), 1, 1, 1
+        
     actual_weight = random.randint(*ACTUAL_WEIGHT_RANGE)
     length, width, height = random.choice(DIMENSION_COMBO_POOL)
     return actual_weight, length, width, height
@@ -253,45 +257,13 @@ def build_booking_detail(
     item_name: str = None,
 ) -> dict:
     """
-    Builds the exact `booking_detail[0]` dict shape captured live for both
-    Parcel and Pallet (confirmed 2026-09-21: Pallet's request is identical
-    to Parcel's except `booking_type` and the absence of
-    `pallet_container_id`, which real capture showed is NOT pallet-specific
-    despite the name -- included here only for booking_type=="parcel" to
-    preserve exact fidelity per type without risking anything that already
-    works). `pickup_location` / `dropoff_location` are dicts as returned by
-    utils/html_parsing.parse_pickup_locations() (or an equivalent shape for
-    a freshly-geocoded international address).
-
-    `delivery_rates` should be the dict returned by
-    RoutechAPIClient.get_delivery_and_rate() -- its per-partner rate keys
-    are merged straight into the payload (mirrors what the UI does: it
-    echoes back every partner's quote, not just the chosen one).
-
-    Receiver AND sender phone number/country-code are both generated to
-    match their respective location's real country format (receiver <-
-    dropoff, sender <- pickup) -- see random_mobile_for_country() and
-    data/phone_formats.py. sender_name stays fixed (the real account
-    holder's name, confirmed via live capture).
+    Builds the exact `booking_detail[0]` dict shape captured live for
+    Parcel, Pallet, and Envelope (Documents).
     """
-    item = random_item()
-    # RULE (user): the HS code must be the one looked up for THIS item name.
-    # Until 2026-10-09 the item name here was re-randomized after the HS
-    # lookup, so e.g. item "books" was sent with the HS code of "keyboard".
-    # Callers now pass the same item_name they used for get_hs_codes().
-    if item_name:
-        item["item_name"] = item_name
-    # Weight/dimensions are normally chosen by the caller BEFORE quoting
-    # rates (so availability is checked for the real shipment) and passed in.
     actual_weight, length, width, height = weight_and_dimensions or random_weight_and_dimensions(booking_type)
-
-    # Receiver is physically at the dropoff location; sender at pickup.
-    # Phone format (dial code + digit count) should match each side's own
-    # country -- see data/phone_formats.py.
     receiver_dial_code, receiver_mobile = random_mobile_for_country(dropoff_location.get("country_code", ""))
     sender_dial_code, sender_mobile = random_mobile_for_country(pickup_location.get("country_code", ""))
 
-    # FIX: Set is_palletized to "true" for Pallet bookings
     is_palletized = "true" if booking_type == "pallet" else "false"
 
     detail = {
@@ -311,7 +283,7 @@ def build_booking_detail(
         "pickup_national_address": pickup_location.get("national_address", ""),
         # -- dropoff --
         "dropoff_address": dropoff_location.get("address", dropoff_location.get("label", "")),
-        "is_international": "1",  # always cross-border under our Saudi-side rule
+        "is_international": "1",
         "dropoff_latitude": str(dropoff_location.get("latitude", "")),
         "dropoff_longitude": str(dropoff_location.get("longitude", "")),
         "dropoff_city": dropoff_location.get("city", ""),
@@ -322,8 +294,6 @@ def build_booking_detail(
         "dropoff_additional_address": dropoff_location.get("additional_address", ""),
         "dropoff_national_address": dropoff_location.get("national_address", ""),
         "item_weight": "",
-        "is_location_unknown": "0",
-        # -- booking meta --
         "booking_type": booking_type,
         # -- receiver ("stakeholder") --
         "stakeholder_name": receiver_name,
@@ -335,20 +305,53 @@ def build_booking_detail(
         "sender_mobile_number": sender_mobile,
         "imported_order_id": "",
         # -- options (business rules) --
-        "insurance": "0",       # always "No"
-        "stackable": "1",       # default "Yes" (not overridden by any stated rule)
+        "insurance": "0",
+        "stackable": "1",
         "weight_per_kg": "",
         "payment_type": "ppd",
         "cod_amount": "",
-        "schedule_type": "schedule_now",  # "On Demand"
-        "scheduled_time": "",
+        "schedule_type": "schedule_now",
         "currency_code": "SAR",
         "currency_value": "1",
         "delivery_type": "regular",
-        "is_invoice_required": "0",  # "0" = Create Invoice (no upload needed)
+        "is_invoice_required": "0",
         "shipping_method": "home",
         "shipment_content_type": "dry",
-        "item_list_details": [
+        "quantity": "1",
+        "is_offer_apply": "false",
+        "offer_code": "",
+        "delivery_partners": delivery_partner,
+    }
+
+    # Envelope-specific rules (no HS code, fixed item, fixed dims, current time)
+    if booking_type == "envelope":
+        detail["scheduled_time"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        detail["item_list_details"] = [
+            {
+                "item_name": "Envelope Shipment",
+                "item_quantity": "1",
+                "item_detail": "",
+                "item_price": "1"
+            }
+        ]
+        detail["package_dimensions"] = [
+            {
+                "actual_weight": str(actual_weight),
+                "length": "1",
+                "width": "1",
+                "height": "1"
+            }
+        ]
+    else:
+        # Parcel and Pallet rules
+        detail["is_location_unknown"] = "0"
+        detail["scheduled_time"] = ""
+        
+        item = random_item()
+        if item_name:
+            item["item_name"] = item_name
+            
+        detail["item_list_details"] = [
             {
                 "item_name": item["item_name"],
                 "item_quantity": item["item_quantity"],
@@ -356,36 +359,31 @@ def build_booking_detail(
                 "hs_code": hs_code,
                 "item_price": item["item_price"],
             }
-        ],
-        "quantity": "1",  # package quantity
-        "is_offer_apply": "false",
-        "package_dimensions": [
+        ]
+        detail["package_dimensions"] = [
             {
                 "actual_weight": str(actual_weight),
                 "length": str(length),
                 "width": str(width),
                 "height": str(height),
             }
-        ],
-        "offer_code": "",
-        "is_palletized": is_palletized,
-        "delivery_partners": delivery_partner,
-    }
-
-    if booking_type == "parcel":
-        detail["pallet_container_id"] = ""
+        ]
+        
+        if booking_type == "parcel":
+            detail["pallet_container_id"] = ""
+            
+    # Only include is_palletized for Parcel and Pallet (unchecked for envelope)
+    if booking_type != "envelope":
+        detail["is_palletized"] = is_palletized
 
     # Fill delivery_rate_<partner> from the REAL nested response shape
-    # (confirmed 2026-10-07): delivery_rates["amount"][partner]["payable_amount"].
-    # The old code looked for flat "delivery_rate_*" keys that never existed
-    # in the response, so every rate was silently submitted blank.
     amounts = (delivery_rates or {}).get("amount", {}) or {}
     for field in DELIVERY_PARTNER_RATE_FIELDS:
         partner_key = field[len("delivery_rate_"):]
         payable = (amounts.get(partner_key) or {}).get("payable_amount")
         detail[field] = str(payable) if payable not in (None, "") else ""
-    # Any partner with a quote can now be chosen: make sure the chosen one's
-    # rate is present even if its name is not in DELIVERY_PARTNER_RATE_FIELDS.
+        
+    # Ensure the chosen partner's rate is present even if its name is not in DELIVERY_PARTNER_RATE_FIELDS
     chosen_key = f"delivery_rate_{delivery_partner}"
     chosen_payable = (amounts.get(delivery_partner) or {}).get("payable_amount")
     if chosen_key not in detail and chosen_payable not in (None, ""):
@@ -404,3 +402,11 @@ def build_pallet_booking_detail(**kwargs) -> dict:
     except booking_type and no pallet_container_id -- see build_booking_detail().
     """
     return build_booking_detail(booking_type="pallet", **kwargs)
+
+
+def build_envelope_booking_detail(**kwargs) -> dict:
+    """
+    Documents/Envelope booking builder.
+    Uses fixed item details, 1x1x1 dimensions, weight 1 or 2, and no HS code.
+    """
+    return build_booking_detail(booking_type="envelope", **kwargs)
