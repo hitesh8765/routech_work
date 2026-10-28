@@ -1150,3 +1150,30 @@ Key differences from Parcel/Pallet:
   assertion (weight in `[1, 2]`, dims == `(1, 1, 1)`).
 - `booking_test_helpers.py`'s `create_priced_booking` now skips the
   `get_hs_codes` API call when `booking_type == "envelope"`.
+
+##--------------------------------------------------------------------------
+## 20. Session addendum (2026-10-28) — Luggage booking confirmed
+
+**Luggage booking type — CONFIRMED working (2026-10-28):** live recon session
+captured the full flow for a B2B Luggage booking. Key differences from other types:
+- **Endpoints:** Uses `/luggage/...` endpoints instead of `/bookings/...` (except payment, which remains `/bookings/make_ppd_payment`).
+  - `GET /luggage/add` (for CSRF token)
+  - `POST /luggage/booking_form` (saved locations)
+  - `POST /luggage/luggage_details` (fetches `_id` and metadata for chosen luggage type)
+  - `POST /luggage/get_luggage_delivery_and_rate` (rate quote)
+  - `GET /luggage/get_hs_codes?search=<text>` (HS code lookup)
+  - `POST /luggage/add` (creates the booking)
+- **Payload Structure:** 
+  - `booking_type` is `"luggage"`.
+  - Requires a `luggage_list` JSON string containing the slug, weight, quantity, and dimensions.
+  - `item_list_details` is a deeply nested dict keyed by the luggage type's `_id` → list → dict keyed `"<_id>_0"` → list of items (including `luggage_name`).
+  - Flat `item_name` ("Travel Luggage") and `item_quantity` ("1") are also sent alongside the nested details.
+  - `scheduled_time` is filled with current local time (`YYYY-MM-DD HH:MM`).
+  - No `package_dimensions`, `pallet_container_id`, `is_palletized`, `stackable`, or `is_location_unknown` fields.
+- **Rate Quote:** Payload uses `luggage_list` (JSON) and `luggage_type="true"` instead of `package_dimension` arrays. 
+- **Partner Selection:** Only partners with a numeric `payable_amount > 0` in the `amount` dict are bookable. (e.g., UPS returned `payable_amount: null` with garbled `base_amount` strings in one test — this is a known server bug, BUG-026, and such partners must be skipped).
+
+**Implementation notes:**
+- `api/client.py` now includes `get_luggage_details`, `get_luggage_delivery_and_rate`, `get_luggage_hs_codes`, and `create_luggage_booking` (which scrapes CSRF specifically from `/luggage/add`).
+- `data/booking_payloads.py` includes `LUGGAGE_TYPES` (defining 6 sizes from Small to Oversize with their default weights/dims), `build_luggage_rate_payload`, and `build_luggage_booking_detail`.
+- `tests/api/bookings/test_04_luggage_booking.py` follows the established pattern, dynamically fetching the luggage `_id` before quoting rates and building the payload.

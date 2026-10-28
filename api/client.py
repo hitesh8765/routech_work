@@ -305,3 +305,76 @@ class RoutechAPIClient:
         """Convenience: extracts the booking's status text (e.g. 'Shipment Submitted')."""
         html = self.get_booking_details_html(booking_id)
         return extract_status_badge(html)
+
+#----------------------------------------------------------------------------------
+#--------------------------------------------------------------------------------
+    def get_saved_locations(self, booking_type: str = "parcel") -> list[dict]:
+        """
+        POST /bookings/booking_form (or /luggage/booking_form)
+        Returns the raw HTML fragment. Use utils.html_parsing.parse_pickup_locations() 
+        on the result to get structured saved-location data.
+        """
+        if booking_type == "luggage":
+            resp = self.request.post("/luggage/booking_form", form={"no_of_booking": "0"})
+        else:
+            resp = self.request.post(
+                "/bookings/booking_form",
+                form={"no_of_booking": "0", "booking_type": booking_type},
+            )
+        self._check_ok(resp)
+        return parse_pickup_locations(resp.text())
+
+    def get_luggage_details(self, luggage_list: dict) -> dict:
+        """
+        POST /luggage/luggage_details
+        Returns metadata (including the _id) for the chosen luggage types.
+        """
+        resp = self.request.post(
+            "/luggage/luggage_details",
+            form={"luggage_list": json.dumps(luggage_list, separators=(",", ":")), "type": "b2c"},
+        )
+        self._check_ok(resp)
+        return self._safe_json(resp)
+
+    def get_luggage_delivery_and_rate(self, payload: dict) -> dict:
+        """
+        POST /luggage/get_luggage_delivery_and_rate
+        """
+        resp = self.request.post("/luggage/get_luggage_delivery_and_rate", form=payload)
+        self._check_ok(resp)
+        return self._safe_json(resp)
+
+    def get_luggage_hs_codes(self, item_name: str) -> list[dict]:
+        """
+        GET /luggage/get_hs_codes?search=X
+        """
+        resp = self.request.get("/luggage/get_hs_codes", params={"search": item_name})
+        self._check_ok(resp)
+        return self._safe_json(resp)
+
+    def create_luggage_booking(self, booking_detail: dict) -> dict:
+        """
+        POST /luggage/add (multipart/form-data)
+        Note: Luggage requires scraping a fresh CSRF token specifically from /luggage/add.
+        """
+        resp = self.request.get("/luggage/add")
+        self._check_ok(resp)
+        token = extract_csrf_token(resp.text())
+        if not token:
+            raise RuntimeError("Could not scrape _csrf token from /luggage/add response.")
+        
+        multipart = {
+            "is_warehouse": "false",
+            "_csrf": token,
+            "booking_detail": json.dumps([booking_detail]),
+            "is_booking_confirm": "true",
+        }
+        resp = self.request.post("/luggage/add", multipart=multipart, timeout=BOOKING_WRITE_TIMEOUT_MS)
+        if resp.status == 403:
+            resp = self.request.get("/luggage/add")
+            self._check_ok(resp)
+            token = extract_csrf_token(resp.text())
+            multipart["_csrf"] = token
+            resp = self.request.post("/luggage/add", multipart=multipart, timeout=BOOKING_WRITE_TIMEOUT_MS)
+        self._check_ok(resp)
+        return self._safe_json(resp)

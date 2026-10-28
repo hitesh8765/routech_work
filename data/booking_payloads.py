@@ -410,3 +410,168 @@ def build_envelope_booking_detail(**kwargs) -> dict:
     Uses fixed item details, 1x1x1 dimensions, weight 1 or 2, and no HS code.
     """
     return build_booking_detail(booking_type="envelope", **kwargs)
+
+#------------------------------------------------------------------------------
+#-----------------------------------------------------------------------------
+# =========================================================================
+# LUGGAGE-SPECIFIC BUILDERS
+# =========================================================================
+
+LUGGAGE_TYPES = {
+    "small-luggage": {"name": "Small Luggage", "weight": 15, "height": 56, "width": 38, "length": 28},
+    "medium-luggage": {"name": "Medium Luggage", "weight": 20, "height": 66, "width": 46, "length": 28},
+    "standard-luggage": {"name": "Standard Luggage", "weight": 22, "height": 76, "width": 30, "length": 48},
+    "large-luggage": {"name": "Large Luggage", "weight": 25, "height": 81, "width": 51, "length": 30},
+    "x-large-luggage": {"name": "X Large Luggage", "weight": 30, "height": 86, "width": 56, "length": 36},
+    "oversize-luggage": {"name": "Oversize Luggage", "weight": 32, "height": 97, "width": 58, "length": 36},
+}
+
+def build_luggage_rate_payload(
+    pickup: dict,
+    dropoff: dict,
+    luggage_list: dict,
+) -> dict:
+    return {
+        "type": "b2c",
+        "weight": "",
+        "pickup_city": pickup.get("city", ""),
+        "dropoff_city": dropoff.get("city", ""),
+        "pickup_country": pickup.get("country", ""),
+        "dropoff_country": dropoff.get("country", ""),
+        "pickup_country_code": pickup.get("country_code", ""),
+        "dropoff_country_code": dropoff.get("country_code", ""),
+        "is_international": "1",
+        "delivery_reg_same_type": "regular",
+        "payment_type": "ppd",
+        "shipment_content_type": "dry",
+        "luggage_list": json.dumps(luggage_list, separators=(",", ":")),
+        "dropoff_postal_code": dropoff.get("postal_code", ""),
+        "pickup_postal_code": pickup.get("postal_code", ""),
+        "pickup_state_code": pickup.get("state", ""),
+        "dropoff_state_code": dropoff.get("state", ""),
+        "luggage_type": "true",
+        "offer_code": "",
+        "is_offer_apply": "false",
+    }
+
+def build_luggage_booking_detail(
+    pickup_location: dict,
+    dropoff_location: dict,
+    receiver_name: str,
+    delivery_rates: dict,
+    delivery_partner: str,
+    luggage_id: str,
+    luggage_slug: str,
+    luggage_specs: dict,
+    item_name: str,
+    item_quantity: str,
+    item_price: str,
+    hs_code: str,
+    sender_name: str = "Neeraj Sharma",
+) -> dict:
+    receiver_dial_code, receiver_mobile = random_mobile_for_country(dropoff_location.get("country_code", ""))
+    sender_dial_code, sender_mobile = random_mobile_for_country(pickup_location.get("country_code", ""))
+
+    luggage_list_obj = {
+        luggage_slug: {
+            "weight": str(luggage_specs["weight"]),
+            "quantity": "1",
+            "name": luggage_specs["name"],
+            "weight_unit": "KG",
+            "slug": luggage_slug,
+            "height": str(luggage_specs["height"]),
+            "width": str(luggage_specs["width"]),
+            "length": str(luggage_specs["length"]),
+        }
+    }
+
+    detail = {
+        "pickup_location": pickup_location.get("id", ""),
+        "pickup_address": pickup_location.get("address", pickup_location.get("label", "")),
+        "business_name": "",
+        "pickup_latitude": str(pickup_location.get("latitude", "")),
+        "pickup_longitude": str(pickup_location.get("longitude", "")),
+        "pickup_city": pickup_location.get("city", ""),
+        "pickup_state": pickup_location.get("state", ""),
+        "pickup_country": pickup_location.get("country", ""),
+        "pickup_country_code": pickup_location.get("country_code", ""),
+        "pickup_postal_code": pickup_location.get("postal_code", ""),
+        "pickup_additional_address": pickup_location.get("additional_address", ""),
+        "luggage_type": "luggage",
+        "luggage_list": json.dumps(luggage_list_obj, separators=(",", ":")),
+        "type_partner": "b2c",
+        "type": "b2c",
+        "pickup_national_address": pickup_location.get("national_address", ""),
+        "dropoff_address": dropoff_location.get("address", dropoff_location.get("label", "")),
+        "dropoff_latitude": str(dropoff_location.get("latitude", "")),
+        "dropoff_longitude": str(dropoff_location.get("longitude", "")),
+        "dropoff_city": dropoff_location.get("city", ""),
+        "dropoff_state": dropoff_location.get("state", ""),
+        "dropoff_country": dropoff_location.get("country", ""),
+        "dropoff_country_code": dropoff_location.get("country_code", ""),
+        "dropoff_postal_code": dropoff_location.get("postal_code", ""),
+        "dropoff_additional_address": dropoff_location.get("additional_address", ""),
+        "item_weight": "",
+        "is_international": "1",
+        "dropoff_national_address": dropoff_location.get("national_address", ""),
+        "collection_point_address": "",
+        "collection_point_latitude": "",
+        "collection_point_longitude": "",
+        "collection_point_city": "",
+        "collection_point_area": "",
+        "collection_point_country": "",
+        "booking_type": "luggage",
+        "stakeholder_name": receiver_name,
+        "country_code": receiver_dial_code,
+        "stakeholders": receiver_mobile,
+        "sender_name": sender_name,
+        "sender_country_code": sender_dial_code,
+        "sender_mobile_number": sender_mobile,
+        "imported_order_id": "",
+        "item_name": "Travel Luggage",
+        "item_quantity": "1",
+        "is_offer_apply": "false",
+        "item_detail": "",
+        "currency_code": "SAR",
+        "currency_value": "1",
+        "insurance": "0",
+        "payment_type": "ppd",
+        "cod_amount": "",
+        "is_invoice_required": "0",
+        "schedule_type": "schedule_now",
+        "scheduled_time": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "item_list_details": {
+            luggage_id: [
+                {
+                    f"{luggage_id}_0": [
+                        {
+                            "item_name": item_name,
+                            "item_quantity": item_quantity,
+                            "item_detail": "",
+                            "hs_code": hs_code,
+                            "item_price": item_price,
+                            "luggage_name": luggage_specs["name"],
+                        }
+                    ]
+                }
+            ]
+        },
+        "delivery_type": "regular",
+        "shipping_method": "home",
+        "shipment_content_type": "dry",
+        "offer_code": "",
+        "delivery_partners": delivery_partner,
+    }
+
+    amounts = (delivery_rates or {}).get("amount", {}) or {}
+    for field in DELIVERY_PARTNER_RATE_FIELDS:
+        partner_key = field[len("delivery_rate_"):]
+        payable = (amounts.get(partner_key) or {}).get("payable_amount")
+        detail[field] = str(payable) if payable not in (None, "") else ""
+        
+    chosen_key = f"delivery_rate_{delivery_partner}"
+    chosen_payable = (amounts.get(delivery_partner) or {}).get("payable_amount")
+    if chosen_key not in detail and chosen_payable not in (None, ""):
+        detail[chosen_key] = str(chosen_payable)
+
+    return detail
